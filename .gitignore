@@ -1,0 +1,8 @@
+# plugin build output and fetched dependencies
+plugin/deps/
+plugin/out/
+*.dll
+*.zip
+# runtime data the mod writes in the game folder
+reframework/data/
+*.bak
