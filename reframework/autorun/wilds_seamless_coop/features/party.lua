@@ -18,6 +18,7 @@ local ACCEPT_KEY = "app.NetworkRequestManager.acceptInviteLinkParty"
 local next_run = 0
 local tries = {}     -- [steam id] = { at, n }
 local asked = {}     -- [steam id] = time we last asked them to invite us
+local left_until = {} -- [steam id] = they left the Link Party by hand: don't invite them before this time
 local left_by_hand = false
 local pending_accept -- { from contact id, hunter, user, pw, n, at }
 
@@ -29,6 +30,31 @@ local function in_link_with(hunter)
 end
 
 local function my_party_size() return #game.members(game.SESSION.LINK()) end
+
+-- 0.5.0 froze a player's game a few seconds after an automatic invite: REFramework could not build the request's
+-- callback (System.Action`2<Boolean, NETWORK_ERROR_CODE>), so the game got a null one. The game is only asked to
+-- invite / accept when a real callback can be passed; otherwise automatic rebuilding stays off.
+local callbacks_ok -- nil = not checked yet
+local function can_request()
+    if callbacks_ok == nil then
+        callbacks_ok = true
+        for _, name in ipairs({ "inviteLinkParty", "acceptInviteLinkParty" }) do
+            local m = game.method("app.NetworkRequestManager", name)
+            for _, td in ipairs(m and m:get_param_types() or {}) do
+                if td:get_full_name():find("^System%.Action") then
+                    local ok, d = pcall(sdk.create_delegate, td, 0)
+                    if not (ok and d ~= nil) then callbacks_ok = false end
+                end
+            end
+            if not m then callbacks_ok = false end
+        end
+        if not callbacks_ok then
+            util.warn("automatic Link Party rebuilding is off: the game's invite request can't be called safely "
+                .. "on this REFramework (invite your group from the game menu instead)")
+        end
+    end
+    return callbacks_ok
+end
 
 -- Whether we (not contact c) send the invite: whoever has a Link Party with others; otherwise the lower Steam id.
 -- Both games decide from the same HELLO data, so normally exactly one side invites.
@@ -52,6 +78,12 @@ end
 
 -- Invite contact c to our Link Party with the game's own request.
 local function invite(c)
+    if not can_request() or util.now() < (left_until[c.id] or 0) then return end
+    -- Only from an existing Link Party (the freeze happened inviting with none): the game's own menu creates one.
+    if my_party_size() < 1 then
+        party.status = "open a Link Party in the game menu and your group is invited to it automatically"
+        return
+    end
     local t = tries[c.id] or { at = -1000, n = 0 }
     local wait = t.n < MAX_FAST_TRIES and INVITE_RETRY or SLOW_RETRY
     if util.now() - t.at < wait then return end
@@ -73,7 +105,7 @@ local function invite(c)
     -- The session the invite is made from: what the game used when you invited by hand, else alternate LINK / LOBBY.
     local learned = recorder.values(INVITE_KEY)
     local session = learned[1] or ((t.n % 2 == 1) and game.SESSION.LINK() or game.SESSION.LOBBY())
-    local ok = util.try("Link Party invite", recorder.call, nrm, m, { [1] = session, [2] = ml })
+    local ok = util.try("Link Party invite", recorder.call, nrm, m, { [1] = session, [2] = ml, need_callbacks = true })
     if ok then
         local me = game.self_card() or {}
         net.send(c.id, { t = "pinvite", hunter = me.HunterId, user = me.UserId, pw = password() })
@@ -86,6 +118,10 @@ end
 local function accept()
     local a = pending_accept
     if not a or util.now() < a.at then return end
+    if not can_request() then
+        pending_accept = nil
+        return
+    end
     if in_link_with(a.hunter) or a.n >= 4 then
         pending_accept = nil
         return
@@ -98,6 +134,7 @@ local function accept()
     a.n, a.at = a.n + 1, util.now() + 8
     if not game.guid_valid(id) then return end
     local values = recorder.values(ACCEPT_KEY)
+    values.need_callbacks = true
     for i, td in ipairs(m:get_param_types() or {}) do
         local tn = td:get_full_name()
         if tn == "System.Guid" then values[i] = id end
@@ -152,7 +189,7 @@ end
 
 local function on_pleft(c)
     if group.is_member(c.id) then
-        tries[c.id] = { at = util.now(), n = MAX_FAST_TRIES } -- don't chase them; they come back by inviting/joining
+        left_until[c.id] = util.now() + SLOW_RETRY -- don't chase them; they come back by inviting/joining
         util.info(tostring(c.hunter_name) .. " left the Link Party")
     end
 end
@@ -164,6 +201,10 @@ function party.update()
     next_run = now + EVERY
     if not util.on("auto_party") then
         party.status = util.config.enabled == false and "mod off" or (util.sync_paused() and "paused (outsiders)" or "off")
+        return
+    end
+    if not can_request() then
+        party.status = "automatic rebuilding unavailable (not safe on this REFramework); invite from the game menu"
         return
     end
     -- back with the group in one Link Party: resume after a manual leave

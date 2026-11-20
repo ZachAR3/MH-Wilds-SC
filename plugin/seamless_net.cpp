@@ -745,6 +745,59 @@ int l_scan(lua_State* L) {
     return 1;
 }
 
+// resolve({addr, ...}) -> { [i] = "Type.method+0xoff" }: nearest game method at or below each code address, for
+// reading crash dumps (diagnostics only).
+int l_resolve(lua_State* L) {
+    lua_newtable(L);
+    if (g_sdk == nullptr || lua_type(L, 1) != LUA_TTABLE) return 1;
+    std::vector<std::uint64_t> want;
+    for (lua_Integer i = 1;; ++i) {
+        const int t = lua_geti(L, 1, i);
+        if (t != LUA_TNUMBER && t != LUA_TSTRING) { lua_pop(L, 1); break; }
+        want.push_back(t == LUA_TNUMBER ? static_cast<std::uint64_t>(lua_tointeger(L, -1))
+                                        : std::strtoull(lua_tostring(L, -1), nullptr, 0));
+        lua_pop(L, 1);
+    }
+    std::vector<std::uint64_t> best(want.size(), 0);
+    std::vector<std::string> names(want.size());
+    const auto* tdbf = g_sdk->tdb;
+    const auto* tf = g_sdk->type_definition;
+    const auto* mf = g_sdk->method;
+    const auto tdb = g_sdk->functions->get_tdb();
+    if (tdb == nullptr) return 1;
+    std::vector<REFrameworkMethodHandle> methods;
+    const unsigned int ntypes = tdbf->get_num_types(tdb);
+    for (unsigned int ti = 0; ti < ntypes; ++ti) {
+        const auto t = tdbf->get_type(tdb, ti);
+        if (t == nullptr) continue;
+        const unsigned int nm = tf->get_num_methods(t);
+        if (nm == 0 || nm > 20000) continue;
+        methods.assign(nm, nullptr);
+        unsigned int count = 0;
+        if (tf->get_methods(t, methods.data(), nm * sizeof(REFrameworkMethodHandle), &count) != REFRAMEWORK_ERROR_NONE) continue;
+        for (unsigned int mi = 0; mi < count; ++mi) {
+            if (methods[mi] == nullptr) continue;
+            const auto f = reinterpret_cast<std::uint64_t>(mf->get_function(methods[mi]));
+            if (f == 0) continue;
+            for (std::size_t k = 0; k < want.size(); ++k) {
+                if (f <= want[k] && f > best[k]) {
+                    best[k] = f;
+                    const char* n = mf->get_name(methods[mi]);
+                    names[k] = type_name(t) + "." + (n ? n : "?");
+                }
+            }
+        }
+    }
+    for (std::size_t k = 0; k < want.size(); ++k) {
+        char off[32];
+        std::snprintf(off, sizeof(off), "+0x%llx", static_cast<unsigned long long>(want[k] - best[k]));
+        const std::string r = best[k] ? names[k] + off : std::string("?");
+        lua_pushlstring(L, r.data(), r.size());
+        lua_seti(L, -2, static_cast<lua_Integer>(k + 1));
+    }
+    return 1;
+}
+
 void on_lua_state_created(lua_State* L) {
     lua_newtable(L);
     lua_pushcfunction(L, l_available);
@@ -763,6 +816,8 @@ void on_lua_state_created(lua_State* L) {
     lua_setfield(L, -2, "backup_saves");
     lua_pushcfunction(L, l_scan);
     lua_setfield(L, -2, "scan");
+    lua_pushcfunction(L, l_resolve);
+    lua_setfield(L, -2, "resolve");
     lua_pushcfunction(L, l_trust);
     lua_setfield(L, -2, "trust");
     lua_pushcfunction(L, l_invite);
@@ -775,7 +830,7 @@ void on_lua_state_created(lua_State* L) {
     lua_setfield(L, -2, "launch_connect");
     lua_pushcfunction(L, l_callbacks);
     lua_setfield(L, -2, "callbacks");
-    lua_pushstring(L, "1.2.0");
+    lua_pushstring(L, "1.2.1-dev");
     lua_setfield(L, -2, "version");
     lua_setglobal(L, "seamless_net");
 }

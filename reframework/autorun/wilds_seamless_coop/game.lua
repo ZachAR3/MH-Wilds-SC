@@ -119,6 +119,7 @@ function game.guid_valid(str) return str ~= nil and str ~= EMPTY_GUID end
 -- values: { [param_index] = value } overrides; Guid params given as strings are parsed.
 -- Remaining params: Boolean -> false, other value types (ints, enums) -> 0, callbacks -> empty delegate,
 -- other references -> null.
+-- values.need_callbacks = true: refuse to call (error) instead of passing a null callback.
 function game.call(obj, method, values)
     values = values or {}
     local ptypes = method:get_param_types() or {}
@@ -133,7 +134,11 @@ function game.call(obj, method, values)
         elseif v == nil and tname:find("^System%.Action") then
             -- A callback the game will invoke: give it an empty delegate (does nothing) instead of null.
             local ok, d = pcall(sdk.create_delegate, td, 0)
-            if ok then v = d end
+            if ok and d ~= nil then
+                v = d
+            elseif values.need_callbacks then
+                error("no callback object could be made for " .. tname .. "; not calling " .. method:get_name(), 0)
+            end
         elseif v == nil and tname == "System.Boolean" then
             v = false
         elseif v == nil and td:is_value_type() then

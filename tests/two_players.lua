@@ -169,7 +169,7 @@ local function new_player(name, steam_id, hunter)
         to_managed_object = function(v) return v end,
         to_valuetype = function(v) return v end,
         create_managed_string = function(s) return s end,
-        create_delegate = function() return {} end,
+        create_delegate = function() if P.no_delegates then return nil end return {} end,
         create_instance = function(t)
             local o = { type = t, fields = {}, calls = {} }
             o.add_ref = function(self) return self end
@@ -473,6 +473,19 @@ check(B.called("app.NetworkRequestManager.inviteLinkParty") == nil, "only one si
 check(B.called("app.NetworkRequestManager.acceptInviteLinkParty") ~= nil, "the invited member accepts automatically")
 A.party, B.party = party, party
 run(4)
+
+-- REFramework can't build the invite request's callback (the 0.5.0 freeze): never invite or accept then.
+local G = new_player("Gil", "050", "HG"); G.no_delegates = true; G.party = { { name = "Gil", hunter = "HG" } }
+players[#players + 1] = G
+G.util.config.group.members["200"] = { name = "Follower", hunter = "HB" }
+B.util.config.group.members["050"] = { name = "Gil", hunter = "HG" }
+B.calls = {}
+run(40)
+check(G.called("app.NetworkRequestManager.inviteLinkParty") == nil and G.called("app.NetworkRequestManager.acceptInviteLinkParty") == nil,
+    "no Link Party requests when the game's callback can't be made")
+check(G.party_mod.status:find("unavailable") ~= nil, "... and the panel says automatic rebuilding is unavailable")
+table.remove(players)
+B.util.config.group.members["050"] = nil
 
 -- Leaving the Link Party yourself pauses the rebuilding.
 B.party = { { name = "Follower", hunter = "HB" } }

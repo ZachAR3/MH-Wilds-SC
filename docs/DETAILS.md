@@ -131,7 +131,7 @@ If something fails, send `reframework/data/wilds_seamless_coop/logs/` (the newes
 - In the real game (TDB 81, REFramework nightly 01240, Proton): every hook target exists, the plugin loads and its
   Steam callbacks register, save backups work, and the self-test message loop runs through the follower code.
 - Offline, `lua5.4 tests/two_players.lua reframework/autorun` runs the mod for up to five
-  players against a fake game. Its 65 checks cover the group, offline invites, Steam invites, the Link Party
+  players against a fake game. Its 67 checks cover the group, offline invites, Steam invites, the Link Party
   rebuild, outsiders, fast travel, lockstep, cutscenes and backups.
 - **Not tested with a second real player:** messages to an invisible friend, the Steam chat invite, the fast-travel
   warp replay, the Link Party rebuild, outsider refusal, cutscene holds and story mirroring.

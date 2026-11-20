@@ -24,7 +24,7 @@ local cutscene = require("wilds_seamless_coop.features.cutscene")
 local safety = require("wilds_seamless_coop.features.safety")
 local selftest = require("wilds_seamless_coop.selftest")
 
-util.VERSION = "0.5.0"
+util.VERSION = "0.5.1"
 local TICK = 0.25 -- seconds between feature updates
 local FEATURES = { net, safety, group, party, follow, linked, travel, visible, unlock, story, cutscene, selftest }
 
