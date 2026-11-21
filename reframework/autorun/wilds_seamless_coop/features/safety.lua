@@ -63,13 +63,9 @@ function safety.update()
 end
 
 function safety.init()
+    -- The tripwire only matters while story steps can be mirrored.
+    if not util.at_start("story_sync") then return end
     game.hook("app.Net_SessionService", "reportCheatQuest", function() trip("reportCheatQuest") end)
-    -- checkAndReportQuestCheat returns a Boolean whose meaning isn't documented (it returned true during normal play
-    -- without reportCheatQuest ever being called), so it is only logged; the real report is what trips the switch.
-    game.hook("app.Net_SessionService", "checkAndReportQuestCheat", nil, function(retval)
-        util.debug("checkAndReportQuestCheat returned " .. tostring(sdk.to_int64(retval) & 1))
-        return retval
-    end)
 end
 
 return safety

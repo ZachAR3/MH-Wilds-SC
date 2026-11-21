@@ -157,6 +157,7 @@ function story.update()
 end
 
 function story.init()
+    if not (util.at_start("lead_story") or util.at_start("story_sync")) then return end
     for _, step in ipairs(STEPS) do
         by_key[key_of(step)] = step
         game.hook(step[1], step[2], function(args, m)

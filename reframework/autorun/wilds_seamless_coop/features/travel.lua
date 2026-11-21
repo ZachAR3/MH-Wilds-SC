@@ -1,8 +1,8 @@
 -- Fast travel together: when a group member fast travels (or goes back to base), everyone else in the group goes too.
 --   mover:    the game's own warp (app.mcFastTravel.warpPlayer(hunter, stage, position, rotation, WarpInfo, gimmick))
 --             is watched; its stage, position, rotation and warp options are sent to the group.
---   follower: makes the same warpPlayer call for its own hunter, a step to the side ("warp" mode); if that fails or
---             is off, it joins the mover's Environment Link instead, which loads the mover's area ("area" mode).
+--   follower: joins the mover's Environment Link, which loads the mover's area. (0.5.0 replayed the warp itself
+--             with null game objects; that was removed in 0.5.2 until it can be tested live.)
 -- Last mover wins. Never during quests, cutscenes or another warp.
 local util = require("wilds_seamless_coop.util")
 local game = require("wilds_seamless_coop.game")
@@ -13,12 +13,9 @@ local cutscene = require("wilds_seamless_coop.features.cutscene")
 
 local travel = { status = "" }
 
-local WARP_SIG = "warpPlayer(app.HunterCharacter, app.FieldDef.STAGE, via.vec3, via.Quaternion, app.mcFastTravel.WarpInfo, app.GimmickBaseApp)"
-local INFO_CTOR = ".ctor(System.Single, System.Single, System.Single, System.Action, app.HunterDef.WARP_OPTION, System.Boolean, app.WarpDef.SITUATION_TYPE, app.WarpLocationOptimizer.cArg, System.Boolean)"
 local JOIN_KEY = "app.Net_Party.app.NetworkRequestManager.INet_LinkParty.joinPartySync"
-local GIVE_UP, AREA_CHECK, SIDE_STEP = 60, 20, 1.5
+local GIVE_UP, AREA_CHECK = 60, 20
 
-local warping = false -- true while the mod itself warps (so it isn't re-broadcast)
 local seq = 0
 local last_seen = {}  -- [steam id] = last travel seq handled
 local job             -- { from, name, hunter, msg, at, until, mode, done_at }
@@ -43,13 +40,6 @@ local function quat_of(q)
     return nil
 end
 
-local function make_quat(r)
-    if not r then return nil end
-    local q = Quaternion.new(r.w, r.x, r.y, r.z)
-    if math.abs((q.x or 0) - r.x) > 1e-4 or math.abs((q.w or 0) - r.w) > 1e-4 then q = Quaternion.new(r.x, r.y, r.z, r.w) end
-    return q
-end
-
 local function call0(o, name)
     local ok, v = pcall(o.call, o, name)
     if ok then return v end
@@ -62,7 +52,7 @@ end
 
 local function on_warp(args)
     pending_out = nil
-    if warping or not util.on("follow_travel") then return end
+    if not util.on("follow_travel") then return end
     local hunter = game.arg_obj(args, 1)
     local me = game.master_hunter()
     if not (hunter and me and addr(hunter) == addr(me)) then return end
@@ -122,7 +112,7 @@ local function on_travel(c, msg)
     if type(msg.seq) ~= "number" or (last_seen[c.id] and msg.seq <= last_seen[c.id] and msg.seq > 1) then return end
     last_seen[c.id] = msg.seq
     job = { from = c.id, name = c.hunter_name or "partner", hunter = c.hunter, msg = msg, at = util.now() + 1,
-        ["until"] = util.now() + GIVE_UP, mode = util.config.travel_mode or "warp" }
+        ["until"] = util.now() + GIVE_UP, mode = "area" }
     travel.status = "following " .. job.name .. "'s fast travel"
 end
 
@@ -135,29 +125,6 @@ local function busy()
     if cutscene.status ~= "" then return "in a cutscene" end
     if (game.current_stage() or -1) < 0 then return "loading" end
     return nil
-end
-
-local function warp(msg)
-    local ft, hunter = game.fast_travel(), game.master_hunter()
-    if not (ft and hunter and msg.pos) then return false, "no fast travel object or destination" end
-    local info = sdk.create_instance("app.mcFastTravel.WarpInfo")
-    if not info then return false, "WarpInfo not creatable" end
-    info = info:add_ref()
-    local i = msg.info or {}
-    local ok, err = pcall(info.call, info, INFO_CTOR, i.b or 0.0, i.v or 0.0, i.e or 0.0, nil, i.o or 0, i.m == true,
-        i.s or 0, nil, i.n == true)
-    if not ok then return false, "WarpInfo: " .. tostring(err) end
-    local pos = Vector3f.new(msg.pos.x + SIDE_STEP, msg.pos.y, msg.pos.z + SIDE_STEP * 0.5)
-    local rot = make_quat(msg.rot)
-    if not rot then
-        local q = quat_of(ft:get_field("_CharacterRotation"))
-        rot = make_quat(q or { x = 0, y = 0, z = 0, w = 1 })
-    end
-    warping = true
-    ok, err = pcall(ft.call, ft, WARP_SIG, hunter, msg.stage, pos, rot, info, nil)
-    warping = false
-    if not ok then return false, tostring(err) end
-    return true
 end
 
 -- Join the mover's Environment Link: the game loads their area for us.
@@ -204,16 +171,7 @@ function travel.update()
         job.at = now + 1
         return
     end
-    if job.mode == "warp" then
-        local ok, err = warp(job.msg)
-        if ok then
-            util.info("following " .. job.name .. "'s fast travel (stage " .. tostring(job.msg.stage) .. ")")
-            job.done_at = now
-        else
-            util.warn("fast-travel follow failed (" .. tostring(err) .. "); joining " .. job.name .. "'s area instead")
-            job.mode = "area"
-        end
-    elseif job.mode == "area" then
+    if job.mode == "area" then
         if game.current_stage() == job.msg.stage then
             job = nil
             return
@@ -226,6 +184,7 @@ function travel.update()
 end
 
 function travel.init()
+    if not util.at_start("follow_travel") then return end
     net.on("travel", on_travel, true)
     game.hook("app.mcFastTravel", "warpPlayer", on_warp, after_warp)
 end

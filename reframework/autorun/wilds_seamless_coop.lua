@@ -1,13 +1,9 @@
--- Wilds Seamless Co-op: play Monster Hunter Wilds' whole story together, like a seamless co-op mod.
---   * a permanent co-op group (invite any Steam friend once, offline/invisible included); the Link Party and
---     Environment Link are rebuilt automatically after disconnects and late joins;
---   * fast travel takes the group with you; quests are followed automatically;
---   * story lockstep: followers take the leader's story steps on their own save (features/story.lua);
---   * shared cutscenes: start together, skip by vote (features/cutscene.lua);
---   * "Allow outsiders" for SOS flares / random joiners pauses everything that syncs story.
--- Built on the game's own Link Party / Environment Link / quest-invite / fast-travel / story routines, plus a private
--- Steam P2P channel between the mods (reframework/plugins/seamless_net.dll). It never creates or edits quests,
--- rewards, items or leaderboard data, and backs up the save folder before it changes anything (features/safety.lua).
+-- Wilds Seamless Co-op: play Monster Hunter Wilds' story together as one group.
+-- 0.5.2 is the safe build of the rebuild (docs/REBUILD_PLAN.md): the co-op group, the Steam P2P channel between the
+-- mods (reframework/plugins/seamless_net.dll), the panel and save backups. Everything that drives the game
+-- (Environment Link, quests, Link Party, fast travel, story, cutscenes) is experimental, off by default, and only
+-- hooks the game when it is switched on at game start. It never creates or edits quests, rewards, items or
+-- leaderboard data.
 local util = require("wilds_seamless_coop.util")
 local game = require("wilds_seamless_coop.game")
 local recorder = require("wilds_seamless_coop.recorder")
@@ -17,16 +13,14 @@ local party = require("wilds_seamless_coop.features.party")
 local follow = require("wilds_seamless_coop.features.follow")
 local linked = require("wilds_seamless_coop.features.linked")
 local travel = require("wilds_seamless_coop.features.travel")
-local visible = require("wilds_seamless_coop.features.visible")
-local unlock = require("wilds_seamless_coop.features.unlock")
 local story = require("wilds_seamless_coop.features.story")
 local cutscene = require("wilds_seamless_coop.features.cutscene")
 local safety = require("wilds_seamless_coop.features.safety")
 local selftest = require("wilds_seamless_coop.selftest")
 
-util.VERSION = "0.5.1"
+util.VERSION = "0.5.2"
 local TICK = 0.25 -- seconds between feature updates
-local FEATURES = { net, safety, group, party, follow, linked, travel, visible, unlock, story, cutscene, selftest }
+local FEATURES = { net, safety, group, party, follow, linked, travel, story, cutscene, selftest }
 
 util.load_config()
 recorder.init()
@@ -35,6 +29,17 @@ for _, f in ipairs(FEATURES) do
 end
 local p = rawget(_G, "seamless_net")
 util.info("v" .. util.VERSION .. " loaded (plugin " .. tostring(p and p.version or "missing") .. ")")
+if util.migrated then
+    util.info("settings from an older version: every experimental feature was switched off")
+    util.save_config()
+end
+local on_now = {}
+for _, t in ipairs(util.EXPERIMENTAL) do
+    if util.at_start(t[1]) then on_now[#on_now + 1] = t[1] end
+end
+if util.at_start("story_sync") then on_now[#on_now + 1] = "story_sync=" .. tostring(util.config.story_sync) end
+util.info("experimental features on: " .. (#on_now > 0 and table.concat(on_now, ", ") or "none (the game is not hooked)"))
+util.flush_log(true)
 
 local next_tick = 0
 re.on_frame(function()
@@ -62,24 +67,8 @@ end)
 -- Panel (REFramework menu, Insert key)
 ------------------------------------------------------------------------------------------------------------------------
 
-local ADVANCED = {
-    { "steam_chat_invite", "Group invites also send a Steam chat invite" },
-    { "auto_party", "Rebuild the Link Party with your group automatically" },
-    { "auto_follow", "Auto-follow group quests" },
-    { "auto_link", "Auto-invite to Environment Link" },
-    { "auto_accept_link", "Auto-accept Environment Link invites" },
-    { "stay_linked", "Stay in Environment Link through story events" },
-    { "link_in_story", "Allow Environment Link in story missions" },
-    { "relink_after_hunt", "Re-link after hunts" },
-    { "keep_visible", "Keep party members visible" },
-    { "early_unlock", "Environment Link before the story unlocks it" },
-    { "cutscene_sync", "Shared cutscenes (start together, skip by vote)" },
-    { "verbose", "Verbose log" },
-}
 local STORY_MODES = { "off", "dry", "on" }
 local STORY_LABELS = { "Off", "Dry run (log only, no save changes)", "On (take the leader's story steps)" }
-local TRAVEL_MODES = { "warp", "area" }
-local TRAVEL_LABELS = { "Warp to the same spot (falls back to joining their area)", "Join their area" }
 
 local function combo(label, key, modes, labels)
     local current = 1
@@ -179,7 +168,7 @@ re.on_draw_ui(function()
     if not imgui.tree_node("Wilds Seamless Co-op v" .. util.VERSION) then return end
 
     checkbox("Seamless Co-op on", "enabled")
-    local changed, value = imgui.checkbox("Allow outsiders (SOS flares, random joiners) - pauses story sync", util.outsiders)
+    local changed, value = imgui.checkbox("Allow outsiders (SOS flares, random joiners) - pauses group sync", util.outsiders)
     if changed then
         util.outsiders = value
         util.info(value and "outsiders allowed: story, cutscene, travel and party sync paused"
@@ -193,12 +182,6 @@ re.on_draw_ui(function()
     util.try("group panel", draw_group)
     imgui.separator()
 
-    checkbox("Lead the story (exactly one player in the group ticks this)", "lead_story")
-    combo("Story sync", "story_sync", STORY_MODES, STORY_LABELS)
-    checkbox("Fast travel together", "follow_travel")
-    if util.config.follow_travel then combo("Fast travel follow", "travel_mode", TRAVEL_MODES, TRAVEL_LABELS) end
-    imgui.separator()
-
     imgui.text("Link Party: " .. party.status)
     imgui.text("Environment Link: " .. linked.status .. (linked.auto_status ~= "" and ("  (" .. linked.auto_status .. ")") or ""))
     if travel.status ~= "" then imgui.text("Fast travel: " .. travel.status) end
@@ -209,8 +192,20 @@ re.on_draw_ui(function()
     imgui.text("Save backup: " .. safety.backup_status)
     if imgui.button("Back up saves now") then safety.backup("manual") end
 
-    if imgui.tree_node("Advanced settings") then
-        for _, t in ipairs(ADVANCED) do checkbox(t[2], t[1]) end
+    checkbox("Group invites also send a Steam chat invite", "steam_chat_invite")
+    checkbox("Verbose log", "verbose")
+
+    if imgui.tree_node("Experimental (not working in the real game yet)") then
+        imgui.text("These can freeze or crash the game. Only switch one on when testing it together, and restart")
+        imgui.text("the game afterwards: a feature only hooks the game if it was on when the game started.")
+        for _, t in ipairs(util.EXPERIMENTAL) do
+            checkbox(t[2], t[1])
+            if util.config[t[1]] ~= util.at_start(t[1]) then
+                imgui.same_line()
+                imgui.text("(restart the game to apply)")
+            end
+        end
+        combo("Story sync", "story_sync", STORY_MODES, STORY_LABELS)
         imgui.tree_pop()
     end
     if imgui.tree_node("Story steps") then
@@ -227,7 +222,6 @@ re.on_draw_ui(function()
         if imgui.button("Write signatures.json") then util.try("dump", recorder.dump) end
         if imgui.button("Run self-test (writes selftest.json)") then util.try("self-test", selftest.run_all) end
         imgui.text("Self-test: " .. selftest.summary)
-        imgui.text("Early-unlock gates found: " .. (#unlock.hooked > 0 and table.concat(unlock.hooked, ", ") or "none"))
         imgui.text("Learned from the game: " .. json.dump_string(util.config.learned))
         for _, line in ipairs(util.history) do imgui.text(line) end
         imgui.tree_pop()

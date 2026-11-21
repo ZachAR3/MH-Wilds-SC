@@ -41,7 +41,8 @@ local TYPES = {
         { "inviteLinkParty", { "app.net_session_manager.SESSION_TYPE", "app.Net_MLUserInfo", "System.Action`2<System.Boolean,app.NETWORK_ERROR_CODE>" } },
         { "acceptInviteLinkParty", { "System.Guid", "System.String", "System.Action`2<System.Boolean,app.NETWORK_ERROR_CODE>" } },
         { "leaveSession", { "app.net_session_manager.SESSION_TYPE", "System.Action`2<System.Boolean,app.NETWORK_ERROR_CODE>", "System.Boolean" } } },
-    ["app.Net_Party"] = { { "isEnableJoinAcceptPartySync", { "System.Guid" }, "app.NETWORK_ERROR_CODE" } },
+    ["app.Net_Party"] = { { "app.NetworkRequestManager.INet_LinkParty.joinPartySync",
+        { "System.Guid", "System.Action`3<System.Boolean,app.FieldDef.STAGE,app.NETWORK_ERROR_CODE>", "System.Boolean" } } },
     ["app.mcFastTravel"] = { { "warpPlayer", { "app.HunterCharacter", "app.FieldDef.STAGE", "via.vec3", "via.Quaternion", "app.mcFastTravel.WarpInfo", "app.GimmickBaseApp" } } },
     ["app.MasterFieldManager"] = { { "get_CurrentStage", {}, "app.FieldDef.STAGE" } },
     ["System.Guid"] = { { "Parse", { "System.String" }, "System.Guid", true } },
@@ -54,7 +55,14 @@ local TYPES = {
         { "checkAndReportQuestCheat", { "app.cKeepQuestData", "System.Guid" }, "System.Boolean" } },
 }
 
-local function new_player(name, steam_id, hunter)
+-- Saved settings the fake game starts with: the experimental features on (the logic tests need them), as a tester
+-- would have them. new_player(..., { fresh = true }) starts with no config.json at all.
+local TEST_CONFIG = { config_version = 2, story_sync = "dry", auto_link = true, auto_accept_link = true,
+    relink_after_hunt = true, auto_follow = true, auto_party = true, follow_travel = true, stay_linked = true,
+    cutscene_sync = true }
+
+local function new_player(name, steam_id, hunter, opts)
+    opts = opts or {}
     steam_names[steam_id] = name .. "_steam"
     local P = { name = name, id = steam_id, hunter = hunter, progress = 300, in_quest = false, party = {},
         calls = {}, hooks = {}, backups = 0, backup_ok = true, warnings = {}, frames = {} }
@@ -114,7 +122,14 @@ local function new_player(name, steam_id, hunter)
             if k == "getEnableMissionController" then return a == 7 and controller or nil end
         end },
         ["app.NetworkManager"] = {
-            get_type_definition = function() return tdef("app.NetworkManager") end,
+            get_type_definition = function()
+                local td = tdef("app.NetworkManager")
+                td.get_methods = function() return { {
+                    get_num_params = function() return 0 end, is_static = function() return false end,
+                    get_return_type = function() return tdef("app.Net_Party") end,
+                    call = function() return P.objects["app.Net_Party"] end } } end
+                return td
+            end,
             call = function(_, k)
                 if k ~= "get_UserInfoManager" then return nil end
                 return { call = function(_, _, session)
@@ -126,6 +141,7 @@ local function new_player(name, steam_id, hunter)
                 end }
             end },
         ["app.DemoMediator"] = {},
+        ["app.Net_Party"] = {},
         ["app.NetworkRequestManager"] = { call = function() end },
         ["app.MasterFieldManager"] = {},
         ["app.PlayerManager"] = { call = function(_, k)
@@ -180,7 +196,11 @@ local function new_player(name, steam_id, hunter)
         get_tdb_version = function() return 81 end,
     }
     env.json = {
-        load_file = function() return nil end, dump_file = function() return true end,
+        load_file = function()
+            if opts.fresh then return nil end
+            return copy(opts.config or TEST_CONFIG)
+        end,
+        dump_file = function() return true end,
         dump_string = function(v) nstore = nstore + 1; store["#" .. nstore] = copy(v); return "#" .. nstore end,
         load_string = function(s) return copy(assert(store[s], "not json: " .. tostring(s))) end,
     }
@@ -223,6 +243,7 @@ local function new_player(name, steam_id, hunter)
     P.env_status = function() local l = env.require("wilds_seamless_coop.features.linked"); return l.auto_status end
     P.group, P.party_mod = env.require("wilds_seamless_coop.features.group"), env.require("wilds_seamless_coop.features.party")
     P.travel = env.require("wilds_seamless_coop.features.travel")
+    P.game = env.require("wilds_seamless_coop.game")
 
     -- The game itself calls one of its routines (hooks run first, like in the real game).
     function P.game_calls(tname, mname, ...)
@@ -454,15 +475,6 @@ run(16)
 check(A.util.stranger == "Random" and A.util.story_mode() == "off", "a non-group hunter in the party pauses story sync")
 table.remove(party); run(2)
 check(A.util.stranger == nil and A.util.story_mode() ~= "off", "... and sync resumes when they leave")
-local function join_code(P, guid)
-    return P.game_calls("app.Net_Party", "isEnableJoinAcceptPartySync", { call = function() return guid end }) or 0
-end
-check(join_code(A, "HX") == 7, "Environment Link joins from outside the group are refused")
-check(join_code(A, "HB") == 0, "... group members can join")
-A.util.outsiders = true
-check(join_code(A, "HX") == 0, "... and outsiders can join while allowed")
-A.util.outsiders = false
-
 -- Disconnect: A and B lose the Link Party; the lower Steam id re-invites, the other accepts.
 A.party, B.party = { { name = "Leader", hunter = "HA" } }, { { name = "Follower", hunter = "HB" } }
 A.calls, B.calls = {}, {}
@@ -503,23 +515,52 @@ check(not chased, "someone who left by hand is not chased with invites")
 A.party, B.party = party, party
 run(4)
 
--- Fast travel: A travels, B warps to the same spot.
+-- Fast travel: A travels, B joins A's area over Environment Link (the warp replay is gone since 0.5.2).
+local JOIN = "app.Net_Party.app.NetworkRequestManager.INet_LinkParty.joinPartySync"
 A.ft_fields = { _WarpPosition = { x = 10, y = 2, z = 30 }, _CharacterRotation = { x = 0, y = 0.7, z = 0, w = 0.7 }, _TargetStage = 12 }
+B.calls = {}
 A.game_calls("app.mcFastTravel", "warpPlayer", A.hunter_obj, 12, { x = 10, y = 2, z = 30 }, { x = 0, y = 0.7, z = 0, w = 0.7 }, nil, nil)
 run(3)
-check(#B.warps == 1 and B.warps[1].stage == 12 and math.abs(B.warps[1].pos.x - 11.5) < 1e-6, "a fast travel takes the group member to the same spot")
-check(#A.warps == 0, "the follower's warp is not sent back")
+local join = B.called(JOIN)
+check(join ~= nil and join[2]:call() == "HA", "a fast travel makes the group member join the mover's area")
+check(#B.warps == 0 and #A.warps == 0, "... without replaying the warp itself")
 B.in_quest = true
 A.game_calls("app.mcFastTravel", "warpPlayer", A.hunter_obj, 13, { x = 1, y = 1, z = 1 }, { x = 0, y = 0, z = 0, w = 1 }, nil, nil)
 A.ft_fields._TargetStage = 13
 run(3)
-check(#B.warps == 1, "nobody is pulled out of a quest")
+check(B.called(JOIN) == nil, "nobody is pulled out of a quest")
 B.in_quest = false; run(3)
-check(#B.warps == 2, "... they follow once the quest is over")
+check(B.called(JOIN) ~= nil, "... they follow once the quest is over")
 B.util.outsiders = true
 A.game_calls("app.mcFastTravel", "warpPlayer", A.hunter_obj, 14, { x = 1, y = 1, z = 1 }, { x = 0, y = 0, z = 0, w = 1 }, nil, nil)
 run(3)
-check(#B.warps == 2, "no travel follow while outsiders are allowed")
+check(B.called(JOIN) == nil, "no travel follow while outsiders are allowed")
 B.util.outsiders = false
+
+------------------------------------------------------------------------------------------------------------------------
+-- 0.5.2: safe by default
+------------------------------------------------------------------------------------------------------------------------
+local F = new_player("Fresh", "060", "HF", { fresh = true })
+local all_off = true
+for _, t in ipairs(F.util.EXPERIMENTAL) do if F.util.config[t[1]] then all_off = false end end
+check(all_off and F.util.config.story_sync == "off", "a new install starts with every experimental feature off")
+check(next(F.hooks) == nil, "... and doesn't hook the game at all")
+F.util.config.auto_link = true
+check(not F.util.on("auto_link") and not F.util.at_start("auto_link"), "switching a feature on during play waits for the next game start")
+
+local O = new_player("Old", "070", "HO", { config = { auto_link = true, auto_party = true, lead_story = true, story_sync = "on",
+    travel_mode = "warp", group = { members = { ["100"] = { name = "Leader" } } } } })
+check(not O.util.config.auto_link and not O.util.config.auto_party and not O.util.config.lead_story
+    and O.util.config.story_sync == "off" and O.util.migrated, "settings from 0.5.1 are reset to the safe defaults once")
+check(O.util.config.group.members["100"] ~= nil, "... keeping the co-op group")
+check(next(O.hooks) == nil, "... and the game isn't hooked")
+
+-- No game request is ever made with a null callback.
+local H = new_player("Hal", "080", "HH"); H.no_delegates = true
+local nrm_m
+for _, m in ipairs(H.methods["app.NetworkRequestManager"]) do if m.name == "inviteLinkPartySync" then nrm_m = m end end
+local ok_call, why = pcall(H.game.call, {}, nrm_m, { [1] = "HA", [2] = 5 })
+check(not ok_call and tostring(why):find("no callback") and H.called("app.NetworkRequestManager.inviteLinkPartySync") == nil,
+    "a request whose callback can't be made is refused, not sent with null")
 
 print(string.format("\nALL %d CHECKS PASSED", passed))

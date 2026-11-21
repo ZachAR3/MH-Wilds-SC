@@ -92,6 +92,7 @@ function follow.update()
 end
 
 function follow.init()
+    if not util.at_start("auto_follow") then return end
     game.hook("app.Net_Party", "addQuestInviteNotify", on_invite)
     game.hook("app.NetworkRequestManager", "acceptInviteLinkPartyQuest", on_manual_accept)
 end

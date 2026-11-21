@@ -4,8 +4,9 @@ A mod for Monster Hunter Wilds that lets you and your friends play through the w
 without re-inviting each other all the time. It's inspired by the Seamless Co-op mods for Elden Ring and Monster
 Hunter World, but it's written from scratch for Wilds.
 
-> **This is an alpha.** It has mostly been tested against a fake copy of the game and only lightly in the real one.
-> Expect bugs, and expect things to break after game updates.
+> **This is an alpha, and right now most of it doesn't work.** 0.5.0 and 0.5.1 froze and crashed the game in real
+> co-op sessions. 0.5.2 is a safe build: only the co-op group and save backups are on, and everything else is
+> switched off while it gets rebuilt one feature at a time ([docs/REBUILD_PLAN.md](docs/REBUILD_PLAN.md)).
 
 ## ⚠️ Read this first
 
@@ -17,17 +18,20 @@ Hunter World, but it's written from scratch for Wilds.
 
 ## What it does
 
-- **Co-op group**: invite a Steam friend once from the mod's menu (they can be offline or invisible). After
-  that you stay grouped until someone leaves.
-- **The Link Party fixes itself**: if someone disconnects or starts the game later, the mod puts the party back
-  together.
-- **Fast travel together**: when one person fast travels, everyone else in the group comes along.
-- **Auto-follow quests**: when someone in the group posts a quest, the others join it.
-- **Story in sync**: one player leads, and the others' saves follow the same story steps. This starts as a dry
-  run that only logs what it would do, until you switch it on.
-- **Shared cutscenes**: cutscenes start together, and skipping one is a vote.
-- **Closed group**: people outside your group can't join your Environment Link. Tick *Allow outsiders* if you
-  want SOS flares or randoms; story sync pauses while you do.
+What works now (0.5.2):
+
+- **Co-op group**: invite a Steam friend once from the mod's menu (they can be offline or invisible). After that you
+  stay grouped until someone leaves. The invite also sends a Steam chat invite.
+- **Save backups** every time the game starts.
+- A log line before every call the mod makes into the game, so crashes can be traced.
+
+Being rebuilt (experimental, off by default, can crash the game):
+
+- Auto Environment Link, and re-linking after hunts
+- Auto-joining group quests
+- Putting the group back in one Link Party after a disconnect
+- Fast travel together
+- Story sync and shared cutscenes
 
 ## Requirements
 
@@ -39,7 +43,8 @@ Hunter World, but it's written from scratch for Wilds.
 ## Install
 
 1. Install REFramework: put its `dinput8.dll` in the game folder, next to `MonsterHunterWilds.exe`.
-2. Copy this repo's `reframework` folder into the game folder and merge it with the one that's already there.
+2. Copy this repo's `reframework` folder into the game folder and merge it with the one that's already there. If you
+   are updating, delete the old `reframework/autorun/wilds_seamless_coop` folder first.
 3. Build `seamless_net.dll` (see below), or grab it from a release if there is one, and put it in
    `reframework/plugins/`.
 4. On Linux or Steam Deck, set the game's Steam launch options to `WINEDLLOVERRIDES="dinput8=n,b" %command%`.
@@ -51,9 +56,9 @@ folder and `reframework/plugins/seamless_net.dll`.
 ## Playing
 
 1. One of you opens *Invite a Steam friend* and invites the other. The other accepts in their menu.
-2. One player ticks **Lead the story**. Leave *Story sync* on **Dry run** for your first session, and check the
-   *Story steps* list to see that it looks right.
-3. Play. If something goes wrong, the logs are in `reframework/data/wilds_seamless_coop/logs/`.
+2. Make the Link Party and Environment Link from the game's own menu, as usual.
+3. Play. If something goes wrong, the logs are in `reframework/data/wilds_seamless_coop/logs/`. After a crash, copy
+   `re2_framework_log.txt` before starting the game again, because the game overwrites it.
 
 More detail on how each part works is in [docs/DETAILS.md](docs/DETAILS.md).
 

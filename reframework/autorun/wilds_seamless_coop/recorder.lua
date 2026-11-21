@@ -106,6 +106,8 @@ function recorder.dump()
 end
 
 function recorder.init()
+    -- Learning is only needed by the experimental features; with all of them off, the game isn't hooked at all.
+    if not util.any_experimental_at_start() then return end
     for _, w in ipairs(recorder.WATCHED) do watch(w[1], w[2]) end
 end
 

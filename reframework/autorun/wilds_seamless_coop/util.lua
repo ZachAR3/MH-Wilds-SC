@@ -5,30 +5,64 @@ local PREFIX = "[SeamlessCoop] "
 local CONFIG_FILE = "wilds_seamless_coop/config.json" -- relative to reframework/data
 local LOG_SLOTS = 5                                   -- logs/session-1.log .. session-5.log, oldest overwritten
 
+-- Bumped when a release has to reset saved settings (see load_config).
+local CONFIG_VERSION = 2
+
 util.defaults = {
     enabled = true,           -- master switch: off = the game plays exactly as without the mod (save backups still run)
-    follow_travel = true,     -- fast travel takes your group with you
-    travel_mode = "warp",     -- "warp" (same spot, falls back to "area") | "area" (join the mover's Environment Link)
     steam_chat_invite = true, -- group invites also send a Steam chat invite (reaches offline/invisible friends)
-    auto_follow = true,       -- accept Link Party quest invites automatically
-    stay_linked = true,       -- don't drop Environment Link when a story event starts
-    link_in_story = true,     -- allow Environment Link in story stages once the game has unlocked it
-    auto_link = true,         -- send Environment Link invites to modded Link Party members when you are in a field together
-    auto_accept_link = true,  -- accept Environment Link invites from Link Party members automatically
-    auto_party = true,        -- rebuild the Link Party with your group after a disconnect or a late join
-    relink_after_hunt = true, -- re-invite the hunters you were linked with when a hunt ends
-    keep_visible = true,      -- keep other hunters drawn during story segments
-    early_unlock = true,      -- multiplayer and Environment Link from the start of the story (no save changes)
-    lead_story = false,       -- this player leads the story (exactly one player in the party ticks it)
-    story_sync = "dry",       -- "off" | "dry" (log the leader's story steps only) | "on" (take them on your save)
-    cutscene_sync = true,     -- start cutscenes together, skip by vote
-    selftest_scan = false,    -- also write scan.json (where the game declares the routines the mod uses)
-    selftest_watch = false,   -- poll selftest_request.json (automated tests only)
-    selftest = false,         -- write selftest.json ~20 s after the game starts
-    verbose = false,          -- extra log lines
+    -- Experimental (util.EXPERIMENTAL): not working in the real game yet. Off unless switched on, and their hooks are
+    -- only installed when they are on at game start.
+    follow_travel = false,     -- fast travel takes your group with you
+    travel_mode = "area",      -- "warp" (same spot, falls back to "area") | "area" (join the mover's Environment Link)
+    auto_follow = false,       -- accept Link Party quest invites automatically
+    stay_linked = false,       -- don't drop Environment Link when a story event starts
+    auto_link = false,         -- send Environment Link invites to modded Link Party members in the same field
+    auto_accept_link = false,  -- accept Environment Link invites from Link Party members automatically
+    auto_party = false,        -- rebuild the Link Party with your group after a disconnect or a late join
+    relink_after_hunt = false, -- re-invite the hunters you were linked with when a hunt ends
+    lead_story = false,        -- this player leads the story (exactly one player in the party ticks it)
+    story_sync = "off",        -- "off" | "dry" (log the leader's story steps only) | "on" (take them on your save)
+    cutscene_sync = false,     -- start cutscenes together, skip by vote
+    selftest_scan = false,     -- also write scan.json (where the game declares the routines the mod uses)
+    selftest_watch = false,    -- poll selftest_request.json (automated tests only)
+    selftest = false,          -- write selftest.json ~20 s after the game starts
+    verbose = false,           -- extra log lines
+}
+
+-- { key, panel label } of the features that are not working in the real game yet.
+util.EXPERIMENTAL = {
+    { "auto_link", "Auto-invite to Environment Link" },
+    { "auto_accept_link", "Auto-accept Environment Link invites" },
+    { "relink_after_hunt", "Re-link after hunts" },
+    { "auto_follow", "Auto-follow group quests" },
+    { "auto_party", "Rebuild the Link Party with your group automatically" },
+    { "follow_travel", "Fast travel together" },
+    { "stay_linked", "Stay in Environment Link through story events" },
+    { "cutscene_sync", "Shared cutscenes (start together, skip by vote)" },
+    { "lead_story", "Lead the story (exactly one player in the group)" },
 }
 
 util.config = {}
+util.migrated = false -- this start switched the experimental features off (settings from 0.5.1 or older)
+
+-- What a setting was when the game started. Hooks are installed at start and can't be removed, so features that
+-- hook the game decide from this whether to hook at all.
+local at_start = {}
+function util.at_start(key)
+    if at_start.enabled == false then return false end
+    local v = at_start[key]
+    if key == "story_sync" then return v ~= nil and v ~= "off" end
+    return v == true
+end
+
+-- Any experimental feature on at game start (the recorder's hooks are only needed then).
+function util.any_experimental_at_start()
+    for _, t in ipairs(util.EXPERIMENTAL) do
+        if util.at_start(t[1]) then return true end
+    end
+    return util.at_start("story_sync")
+end
 
 -- Runtime only (never saved): "Allow outsiders" is off every time the game starts.
 util.outsiders = false        -- the player allowed non-group hunters in: story/cutscene sync paused
@@ -38,9 +72,15 @@ util.stranger = nil           -- name of a non-group hunter in your Link Party /
 local GROUP_ONLY = { cutscene_sync = true, follow_travel = true, auto_party = true }
 
 -- A feature switch, honouring the master switch and the outsider pause.
+local experimental_key = {}
 function util.on(key)
     if util.config.enabled == false then return false end
     if GROUP_ONLY[key] and util.sync_paused() then return false end
+    if next(experimental_key) == nil then
+        for _, t in ipairs(util.EXPERIMENTAL) do experimental_key[t[1]] = true end
+    end
+    -- An experimental feature switched on during play waits for the next game start (its hooks aren't installed).
+    if experimental_key[key] and not util.at_start(key) then return false end
     return util.config[key] == true
 end
 
@@ -77,7 +117,10 @@ local function push(level, msg)
 end
 
 function util.info(msg) push("info", msg) end
-function util.warn(msg) push("warn", msg) end
+function util.warn(msg)
+    push("warn", msg)
+    util.flush_log(true)
+end
 function util.debug(msg)
     if util.config.verbose then push("info", msg) end
 end
@@ -89,11 +132,17 @@ function util.trace(msg)
     end
 end
 
+-- Written to disk at once: if the game crashes right after, the log still shows what the mod was doing.
+function util.breadcrumb(msg)
+    util.trace(msg)
+    util.flush_log(true)
+end
+
 function util.log_file() return file_name and ("reframework/data/" .. file_name) or "(not written yet)" end
 
 function util.flush_log(force)
     if not file_dirty or (not force and os.clock() < next_flush) then return end
-    next_flush = os.clock() + 5
+    next_flush = os.clock() + 1
     if not file_name then
         local slot = (tonumber(util.config.log_slot) or 0) % LOG_SLOTS + 1
         util.config.log_slot = slot
@@ -123,6 +172,15 @@ function util.load_config()
     if type(util.config.learned.stage_getter) == "table" and util.config.learned.stage_getter.method == "getDevCurrentStage" then
         util.config.learned.stage_getter = nil
     end
+    -- 0.5.1 and older had every feature on, and some of them crashed the game: start from the safe defaults once.
+    if next(saved) ~= nil and (tonumber(saved.config_version) or 1) < CONFIG_VERSION then
+        for _, t in ipairs(util.EXPERIMENTAL) do util.config[t[1]] = false end
+        util.config.story_sync = "off"
+        util.config.travel_mode = "area"
+        util.migrated = true
+    end
+    util.config.config_version = CONFIG_VERSION
+    for k, v in pairs(util.config) do at_start[k] = v end
 end
 
 function util.save_config()

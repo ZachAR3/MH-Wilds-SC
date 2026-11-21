@@ -105,7 +105,7 @@ local function invite(c)
     -- The session the invite is made from: what the game used when you invited by hand, else alternate LINK / LOBBY.
     local learned = recorder.values(INVITE_KEY)
     local session = learned[1] or ((t.n % 2 == 1) and game.SESSION.LINK() or game.SESSION.LOBBY())
-    local ok = util.try("Link Party invite", recorder.call, nrm, m, { [1] = session, [2] = ml, need_callbacks = true })
+    local ok = util.try("Link Party invite", recorder.call, nrm, m, { [1] = session, [2] = ml })
     if ok then
         local me = game.self_card() or {}
         net.send(c.id, { t = "pinvite", hunter = me.HunterId, user = me.UserId, pw = password() })
@@ -134,7 +134,6 @@ local function accept()
     a.n, a.at = a.n + 1, util.now() + 8
     if not game.guid_valid(id) then return end
     local values = recorder.values(ACCEPT_KEY)
-    values.need_callbacks = true
     for i, td in ipairs(m:get_param_types() or {}) do
         local tn = td:get_full_name()
         if tn == "System.Guid" then values[i] = id end
@@ -252,6 +251,7 @@ function party.update()
 end
 
 function party.init()
+    if not util.at_start("auto_party") then return end
     net.on("pinvite", on_pinvite, true)
     net.on("pneed", on_need, true)
     net.on("pleft", on_pleft, true)

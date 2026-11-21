@@ -119,7 +119,8 @@ function game.guid_valid(str) return str ~= nil and str ~= EMPTY_GUID end
 -- values: { [param_index] = value } overrides; Guid params given as strings are parsed.
 -- Remaining params: Boolean -> false, other value types (ints, enums) -> 0, callbacks -> empty delegate,
 -- other references -> null.
--- values.need_callbacks = true: refuse to call (error) instead of passing a null callback.
+-- A callback the mod can't build is never replaced by null: the call is refused (error). In 0.5.0/0.5.1, null
+-- callbacks froze and crashed the game.
 function game.call(obj, method, values)
     values = values or {}
     local ptypes = method:get_param_types() or {}
@@ -136,7 +137,7 @@ function game.call(obj, method, values)
             local ok, d = pcall(sdk.create_delegate, td, 0)
             if ok and d ~= nil then
                 v = d
-            elseif values.need_callbacks then
+            else
                 error("no callback object could be made for " .. tname .. "; not calling " .. method:get_name(), 0)
             end
         elseif v == nil and tname == "System.Boolean" then
@@ -146,7 +147,11 @@ function game.call(obj, method, values)
         end
         args[i] = v
     end
-    return method:call(obj, table.unpack(args, 1, #ptypes))
+    local name = method:get_name()
+    util.breadcrumb("calling " .. name)
+    local res = method:call(obj, table.unpack(args, 1, #ptypes))
+    util.breadcrumb("returned from " .. name)
+    return res
 end
 
 -- Find a component of `obj` of type `type_name`: a zero-argument getter first, then a field.

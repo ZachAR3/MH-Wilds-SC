@@ -187,6 +187,7 @@ function cutscene.update()
 end
 
 function cutscene.init()
+    if not util.at_start("cutscene_sync") then return end
     game.hook("app.DemoMediator", "requestPlay", on_request_play)
     game.hook("app.DemoMediator", "requestSkip", on_request_skip)
     game.hook("app.DemoMediator", "onPlayStartTimeline", on_play_start)

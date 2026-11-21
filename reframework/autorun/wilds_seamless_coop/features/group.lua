@@ -10,7 +10,6 @@
 local util = require("wilds_seamless_coop.util")
 local game = require("wilds_seamless_coop.game")
 local net = require("wilds_seamless_coop.net")
-local unlock = require("wilds_seamless_coop.features.unlock")
 
 local group = {
     pending_out = {}, -- [steam id] = { name, at, until }
@@ -265,26 +264,7 @@ function group.update()
     group.status = string.format("%d member(s), %d online", group.count(), online)
 end
 
--- Closed group: Environment Link joins by hunters outside the group are refused (features/unlock.lua asks this).
-local function refuse_join(guid)
-    if util.config.enabled == false or util.outsiders or group.count() == 0 or not game.guid_valid(guid) then return false end
-    for _, m in pairs(members()) do
-        local c = m.card or {}
-        if guid == m.hunter or guid == c.HunterId or guid == c.UserId then return false end
-    end
-    for _, c in pairs(net.contacts) do
-        local card = c.card or {}
-        if guid == c.hunter or guid == card.HunterId or guid == card.UserId then return false end
-    end
-    local who = guid
-    for _, m in ipairs(game.members(game.SESSION.LINK())) do
-        if m.hunter_id == guid or m.user_id == guid then who = m.name end
-    end
-    return true, tostring(who) .. " is not in your co-op group (tick 'Allow outsiders' to let them in)"
-end
-
 function group.init()
-    unlock.refuse_join = refuse_join
     net.extra_targets = function()
         local out = {}
         for id in pairs(members()) do out[id] = true end
