@@ -1,20 +1,22 @@
 -- Environment Link (the game's "party sync"): keep Link Party members in one shared field.
+-- Everything goes through the game's own menu requests (app.cGUINetworkRequest), which make their own callbacks:
+-- the mod can't create callbacks on this REFramework.
 --   stay_linked       - when a story event starts, the game leaves sync (PARTY_SYNC_OPTION.LEAVE_StoryEvent); skip that.
---   auto_accept_link  - accept Environment Link invites from Link Party members.
---   auto_link         - in a field together, send the Environment Link invite yourself (to Link Party members running
---                       this mod; the one with the lower Steam id sends first, the other follows after a delay).
---   relink_after_hunt - the game ends sync when a hunt ends; re-send the invites you had sent, using the same request.
+--   auto_link         - in a field together, send the game's "invite Link Party to my environment" (to Link Party
+--                       members running this mod; the lower Steam id sends first, the other follows after a delay).
+--   relink_after_hunt - the game ends sync when a hunt ends; send that invite again.
+-- Sending the invite was checked live on 2026-11-21 (the game shows "Invited all Link Members to your environment").
+-- Accepting stays with the player (the game's notice, Y, then Yes): the join window only works from the Invitation
+-- List GUI, which exists only while that menu is open, and opened from anywhere else it crashed the game (2026-11-22).
 local util = require("wilds_seamless_coop.util")
 local game = require("wilds_seamless_coop.game")
-local recorder = require("wilds_seamless_coop.recorder")
 local net = require("wilds_seamless_coop.net")
 
 local linked = { status = "", auto_status = "" }
 
 local skipped = false
-local sent_invites = {}     -- [guid string] = values the game passed to inviteLinkPartySync for that hunter
 local partners = nil        -- members you were linked with when the hunt began
-local relink_at, accept_at, invite_at = nil, 0, 0
+local relink_at, invite_at = nil, 0
 
 local function synced_partners()
     local out = {}
@@ -51,96 +53,21 @@ local function after_leave_sync(retval, m)
 end
 
 ------------------------------------------------------------------------------------------------------------------------
--- auto_accept_link
+-- Environment Link invites go through the game's own menu request, cGUINetworkRequest.reqLinkPartySyncInvite: it
+-- invites every Link Party member, makes its own callbacks and shows the game's "Invited all Link Members to your
+-- environment." window (checked live 2026-11-21). The old path (NetworkRequestManager.inviteLinkPartySync with a
+-- null callback, and a Guid that came out all zero) never worked.
 ------------------------------------------------------------------------------------------------------------------------
 
--- Which id of a hunter the game passes when accepting ("hunter" or "user"), learned from an accept made by hand.
-local function learn_accept(args, m)
-    if recorder.mine then return end
-    local guid
-    for i, td in ipairs(m:get_param_types() or {}) do
-        if td:get_full_name() == "System.Guid" then guid = game.arg_guid(args, i) end
-    end
-    for _, mem in ipairs(game.members(game.SESSION.LINK())) do
-        if guid and guid == mem.hunter_id then util.config.learned.link_id = "hunter" end
-        if guid and guid == mem.user_id then util.config.learned.link_id = "user" end
-    end
-end
-
--- The Link Party member who sent an Environment Link invite (app.Net_Party.InvitedLinkParty), or nil.
-local function inviter(invite)
-    local user = invite:get_field("_User")
-    if user == nil then return nil end
-    local ids = {}
-    for _, getter in ipairs({ "get_HunterId", "get_UserId" }) do
-        local ok, g = pcall(user.call, user, getter)
-        if ok and g then ids[game.guid_str(g) or ""] = true end
-    end
-    for _, mem in ipairs(game.members(game.SESSION.LINK())) do
-        if not mem.is_self and (ids[mem.hunter_id or "-"] or ids[mem.user_id or "-"]) then return mem end
-    end
-    return nil
-end
-
--- Accept a pending Environment Link invite from a Link Party member, the way the game's own accept does:
--- NetworkRequestManager.acceptInviteLinkPartySync(inviter id, callback, invite password, flag).
-local function accept_link_invite()
-    local kind = util.config.learned.link_id
-    if not kind then return end -- accept one invite by hand first, so the mod knows which id the game uses
-    local has = game.method("app.cGUINetworkRequest", "hasInvitationPartySync", 0)
-    local party, nrm = game.party(), game.request_manager()
-    if not (has and party and nrm) or has:call(nil) ~= true then return end
-
-    local list = party:call("get_InvitedSyncList")
-    local count = list and list:call("get_Count") or 0
-    for i = 0, count - 1 do
-        local invite = list:call("get_Item(System.Int32)", i)
-        local from = invite and inviter(invite)
-        if from then
-            local m = game.method("app.NetworkRequestManager", "acceptInviteLinkPartySync")
-            if not m then return end
-            local values = recorder.values("app.NetworkRequestManager.acceptInviteLinkPartySync")
-            for j, td in ipairs(m:get_param_types() or {}) do
-                local t = td:get_full_name()
-                if t == "System.Guid" then values[j] = kind == "user" and from.user_id or from.hunter_id end
-                if t == "System.String" then values[j] = invite:get_field("_Password") end
-            end
-            if util.try("accept Environment Link invite", recorder.call, nrm, m, values) then
-                util.info("accepted Environment Link invite from " .. from.name)
-            end
-            accept_at = util.now() + 10
-            return
-        end
-    end
+local function invite_party(why)
+    local ok = util.try(why, game.menu, "reqLinkPartySyncInvite")
+    if ok then util.info(why .. ": invited your Link Party to your environment") end
+    return ok
 end
 
 ------------------------------------------------------------------------------------------------------------------------
 -- relink_after_hunt
 ------------------------------------------------------------------------------------------------------------------------
-
--- Remember every Environment Link invite the game sends for you, keyed by the invited hunter's id.
-local function on_invite_sync(args, m)
-    if recorder.mine then return end
-    local values, guid = {}, nil
-    for i, td in ipairs(m:get_param_types() or {}) do
-        local t = td:get_full_name()
-        if t == "System.Guid" then
-            guid = game.arg_guid(args, i)
-            values[i] = guid
-        elseif t == "System.Boolean" then
-            values[i] = game.arg_bool(args, i)
-        elseif td:is_value_type() then
-            values[i] = game.arg_int(args, i)
-        end
-    end
-    if guid then
-        sent_invites[guid] = values
-        for _, mem in ipairs(game.members(game.SESSION.LINK())) do
-            if guid == mem.hunter_id then util.config.learned.invite_id = "hunter" end
-            if guid == mem.user_id then util.config.learned.invite_id = "user" end
-        end
-    end
-end
 
 local function on_hunt_start()
     partners = synced_partners()
@@ -153,30 +80,24 @@ local function on_hunt_sync_end()
 end
 
 local function relink()
-    local nrm = game.request_manager()
-    local m = game.method("app.NetworkRequestManager", "inviteLinkPartySync")
-    if not (nrm and m) then return end
     local still = {}
     for _, p in ipairs(synced_partners()) do still[p.hunter_id] = true end
     for _, p in ipairs(partners) do
-        local values = sent_invites[p.hunter_id] or sent_invites[p.user_id]
-        if values and not still[p.hunter_id] then
-            if util.try("re-link " .. p.name, recorder.call, nrm, m, values) then
-                util.info("re-sent Environment Link invite to " .. p.name)
-            end
+        if not still[p.hunter_id] then
+            invite_party("re-link after the hunt")
+            return
         end
     end
 end
 
-
 ------------------------------------------------------------------------------------------------------------------------
--- auto_link
+-- auto_link: in a field together with Link Party members who run the mod, invite them to your environment.
+-- The lower Steam id invites first; the other one only if nothing happened after FOLLOW_DELAY.
 ------------------------------------------------------------------------------------------------------------------------
 
-local INVITE_KEY = "app.NetworkRequestManager.inviteLinkPartySync"
-local invite_log = {}   -- [hunter id] = { stage, at, tries }
+local invite_log = { stage = -1, at = -1000, tries = 0 }
 local unlinked_since = nil
-local STAGE_RETRY, FOLLOW_DELAY, MAX_TRIES = 20, 20, 6
+local RETRY, FOLLOW_DELAY, MAX_TRIES = 45, 20, 3
 
 local function auto_invite()
     local now = util.now()
@@ -196,45 +117,25 @@ local function auto_invite()
         linked.auto_status = "waiting for a field stage that allows Environment Link"
         return
     end
-
     unlinked_since = unlinked_since or now
 
-    local stage = game.current_stage() or recorder.values(INVITE_KEY)[2]
-    local nrm = game.request_manager()
-    local m = game.method("app.NetworkRequestManager", "inviteLinkPartySync")
-    if not (stage and nrm and m) then
-        linked.auto_status = "stage unknown; invite once by hand so the mod can learn it"
+    local peer = net.peer_by_hunter(want[1].hunter_id)
+    local self_id = tostring(net.self_id() or "")
+    local my_turn = self_id ~= "" and self_id < tostring(peer.id)
+    if not my_turn and now - unlinked_since < FOLLOW_DELAY then
+        linked.auto_status = "waiting for " .. want[1].name .. " to invite"
         return
     end
-
-    local p = rawget(_G, "seamless_net")
-    local self_id = tostring(p and p.self_id() or "")
-    for _, mem in ipairs(want) do
-        local peer = net.peer_by_hunter(mem.hunter_id)
-        -- the lower Steam id invites at once; the other waits, in case the first invite didn't get through
-        local my_turn = self_id ~= "" and self_id < tostring(peer.id)
-        if my_turn or now - unlinked_since >= FOLLOW_DELAY then
-            local log = invite_log[mem.hunter_id] or { stage = -1, at = -100, tries = 0 }
-            if log.stage ~= stage then log.tries = 0 end
-            if now - log.at >= STAGE_RETRY and log.tries < MAX_TRIES then
-                local kind = util.config.learned.invite_id
-                if not kind then kind = (log.tries % 2 == 0) and "hunter" or "user" end
-                local id = kind == "user" and mem.user_id or mem.hunter_id
-                if game.guid_valid(id) then
-                    if util.try("auto Environment Link invite", recorder.call, nrm, m,
-                            recorder.values(INVITE_KEY, { [1] = id, [2] = stage })) then
-                        util.info(string.format("sent Environment Link invite to %s (stage %s, %s id)", mem.name,
-                            tostring(stage), kind))
-                    end
-                end
-                log.stage, log.at, log.tries = stage, now, log.tries + 1
-                invite_log[mem.hunter_id] = log
-            end
-            linked.auto_status = string.format("invited %s (try %d)", mem.name, log.tries)
-        else
-            linked.auto_status = "waiting for " .. mem.name .. " to invite"
-        end
+    local stage = game.current_stage() or -1
+    if invite_log.stage ~= stage then invite_log = { stage = stage, at = -1000, tries = 0 } end
+    if invite_log.tries >= MAX_TRIES then
+        linked.auto_status = "gave up in this area after " .. MAX_TRIES .. " invites (invite from the game menu)"
+        return
     end
+    if now - invite_log.at < RETRY then return end
+    invite_log.at, invite_log.tries = now, invite_log.tries + 1
+    invite_party("auto Environment Link")
+    linked.auto_status = string.format("invited your Link Party (try %d)", invite_log.tries)
 end
 
 ------------------------------------------------------------------------------------------------------------------------
@@ -251,11 +152,6 @@ function linked.update()
             relink()
             partners = nil
         end
-    end
-
-    if util.on("auto_accept_link") and not in_quest and now >= accept_at then
-        accept_at = now + 1
-        accept_link_invite()
     end
 
     if util.on("auto_link") and not in_quest and now >= (invite_at or 0) then
@@ -275,12 +171,6 @@ function linked.init()
         game.hook("app.Net_Party", "app.NetworkRequestManager.INet_LinkParty.leaveLinkPartySync", on_leave_sync,
             after_leave_sync)
     end
-    if util.at_start("auto_accept_link") then
-        game.hook("app.NetworkRequestManager", "acceptInviteLinkPartySync", learn_accept)
-    end
-    if util.at_start("auto_link") or util.at_start("relink_after_hunt") then
-        game.hook("app.NetworkRequestManager", "inviteLinkPartySync", on_invite_sync)
-    end
     if util.at_start("relink_after_hunt") then
         game.hook("app.cQuestDirector", "acceptQuest", on_hunt_start)
         game.hook("app.Net_Party", "onLeaveLinkPartySync", nil, function(retval)
@@ -288,6 +178,11 @@ function linked.init()
             return retval
         end)
     end
+end
+
+-- Panel button: invite your Link Party to your environment now (the game's own request; works without any setting).
+function linked.invite_now()
+    return invite_party("Environment Link invite")
 end
 
 return linked

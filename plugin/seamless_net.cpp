@@ -11,15 +11,24 @@
 //   poll()               -> { { from = "7656...", data = "..." }, ... } from friends, trusted ids or ourselves
 //   invite(id, connect)  -> bool   Steam chat game invite to one friend (works whatever their presence)
 //   overlay_invite(connect) -> bool opens Steam's own invite picker with this connect string
-//   events()             -> { { kind = "join", from = id, connect = "..." } | { kind = "session", from = id }, ... }
-//                           "join": the player accepted a Steam invite while the game was running
+//   events()             -> {}   kept for older Lua; 1.3.0 registers no Steam callbacks (see below)
 //   launch_connect()     -> string  connect string the game was launched with from a Steam invite ("" if none)
-//   send_self(data)      -> bool   loopback through Steam to yourself (self-test: proves send + receive work)
+//   send_self(data)      -> bool   loopback inside the plugin to yourself (poll() returns it with from == self_id())
 //   backup_saves(tag)    -> true, folder | false, reason   copies the Steam save folder of this game to
 //                           reframework/data/wilds_seamless_coop/save_backups/<time>-<tag> (newest 20 kept)
 //   scan(names)          -> { { type, method, params = {..}, ret, static }, ... } diagnostic: where the game's type
 //                           database declares methods with these names ("~text" = method name contains text,
 //                           app.* only; "@text" = every method of app.*/ace.* types whose name contains text)
+//
+// 1.3.0: messages go over the old ISteamNetworking P2P API (SendP2PPacket / ReadP2PPacket, channel 92), which the
+// game never uses. 1.2.x used ISteamNetworkingMessages, the API the game's own Link Party / Environment Link traffic
+// uses: Steam keeps one message session per user for every channel, so the plugin accepted and auto-restarted the
+// sessions the game itself was opening and closing with the same partner, and registered its own session-request
+// callback next to the game's. With the plugin loaded the game crashed during Link Party / Environment Link joins
+// (4 of 4 runs, 2026-11-22; none without it). 1.3.0 shares no session, no callback and no relay setup with the game.
+// The later bisect showed the plugin was not the cause: loading it only switched on the mod's Lua member list reads,
+// which wrapped the game's per-player network objects and raced with the game freeing them. The mod 0.5.5 reads
+// those as raw memory. 1.3.0 is kept because it stays out of the game's own sessions.
 //
 // Uses only steam_api64.dll as shipped with the game (flat C API, resolved at run time; no Steamworks files included).
 // Steam flat-API bindings and struct layouts adapted from github.com/Hunterjet/mhwilds-seamless-coop
@@ -48,76 +57,37 @@ extern "C" {
 namespace {
 
 constexpr std::uint32_t kAppId = 2246340; // Monster Hunter Wilds
-constexpr int kChannel = 92;              // our own SteamNetworkingMessages channel
+constexpr int kChannel = 92;              // our own ISteamNetworking P2P channel
 constexpr std::size_t kMaxBytes = 16 * 1024;
 constexpr int kMaxPoll = 64;
 constexpr DWORD kFriendRefreshMs = 3000;
 
-// ---- Steamworks flat-API types (layouts pinned with static_asserts) ----------------------------------------------
-
-#pragma pack(push, 1)
-struct NetIdentity {
-    std::int32_t type;
-    std::int32_t size;
-    union {
-        std::uint64_t steam_id64;
-        char raw[128];
-    };
-};
-#pragma pack(pop)
-static_assert(sizeof(NetIdentity) == 136);
-
-#pragma pack(push, 8)
-struct NetMessage {
-    void* data;
-    std::int32_t size;
-    std::uint32_t connection;
-    NetIdentity peer;
-    std::int64_t connection_user_data;
-    std::int64_t time_received_us;
-    std::int64_t message_number;
-    void (*free_data)(NetMessage*);
-    void (*release)(NetMessage*);
-    std::int32_t channel;
-    std::int32_t flags;
-    std::int64_t user_data;
-    std::uint16_t lane;
-};
-#pragma pack(pop)
-static_assert(offsetof(NetMessage, peer) == 16);
-static_assert(offsetof(NetMessage, channel) == 192);
-
-constexpr std::int32_t kIdentitySteamId = 16;
-constexpr int kSendUnreliable = 0;
-constexpr int kSendReliable = 8;
-constexpr int kSendAutoRestart = 32;
+constexpr int kP2PUnreliable = 0;      // EP2PSend: <= 1200 bytes
+constexpr int kP2PReliable = 2;
+constexpr std::size_t kMaxUnreliable = 1200;
 constexpr int kFriendFlagImmediate = 0x04;
-constexpr int kResultOk = 1;
 
-void register_callbacks();
 
 // ---- Bound functions ------------------------------------------------------------------------------------------------
 
 struct Steam {
     using Accessor = void* (*)();
-    Accessor user_acc{}, friends_acc{}, messages_acc{}, utils_acc{};
+    Accessor user_acc{}, friends_acc{}, net_acc{};
     std::uint64_t (*get_steam_id)(void*){};
     int (*friend_count)(void*, int){};
     std::uint64_t (*friend_by_index)(void*, int, int){};
     const char* (*friend_name)(void*, std::uint64_t){};
     bool (*friend_game)(void*, std::uint64_t, void*){};
-    int (*send)(void*, const NetIdentity*, const void*, std::uint32_t, int, int){};
-    int (*receive)(void*, int, NetMessage**, int){};
-    bool (*accept)(void*, const NetIdentity*){};
-    void (*release)(NetMessage*){};
-    void (*init_relay)(void*){};
+    bool (*send)(void*, std::uint64_t, const void*, std::uint32_t, int, int){};
+    bool (*available)(void*, std::uint32_t*, int){};
+    bool (*read)(void*, void*, std::uint32_t, std::uint32_t*, std::uint64_t*, int){};
+    bool (*accept)(void*, std::uint64_t){};
     bool (*user_data_folder)(void*, char*, int){}; // optional: only the save backup needs it
-    // optional (1.2.0): presence, invites, callbacks
+    // optional (1.2.0): presence, invites
     int (*friend_state)(void*, std::uint64_t){};
     int (*friend_relationship)(void*, std::uint64_t){};
     bool (*invite_user)(void*, std::uint64_t, const char*){};
     void (*overlay_invite)(void*, const char*){};
-    void (*register_callback)(void*, int){};
     Accessor apps_acc{};
     int (*launch_cmdline)(void*, char*, int){};
 
@@ -149,39 +119,34 @@ struct Steam {
         std::string missing;
         bind(dll, user_acc, {"SteamAPI_SteamUser_v023", "SteamAPI_SteamUser_v022", "SteamAPI_SteamUser_v021"}, missing);
         bind(dll, friends_acc, {"SteamAPI_SteamFriends_v018", "SteamAPI_SteamFriends_v017"}, missing);
-        bind(dll, messages_acc, {"SteamAPI_SteamNetworkingMessages_SteamAPI_v002"}, missing);
-        bind(dll, utils_acc, {"SteamAPI_SteamNetworkingUtils_SteamAPI_v004"}, missing);
+        bind(dll, net_acc, {"SteamAPI_SteamNetworking_v006"}, missing);
         bind(dll, get_steam_id, {"SteamAPI_ISteamUser_GetSteamID"}, missing);
         bind(dll, friend_count, {"SteamAPI_ISteamFriends_GetFriendCount"}, missing);
         bind(dll, friend_by_index, {"SteamAPI_ISteamFriends_GetFriendByIndex"}, missing);
         bind(dll, friend_name, {"SteamAPI_ISteamFriends_GetFriendPersonaName"}, missing);
         bind(dll, friend_game, {"SteamAPI_ISteamFriends_GetFriendGamePlayed"}, missing);
-        bind(dll, send, {"SteamAPI_ISteamNetworkingMessages_SendMessageToUser"}, missing);
-        bind(dll, receive, {"SteamAPI_ISteamNetworkingMessages_ReceiveMessagesOnChannel"}, missing);
-        bind(dll, accept, {"SteamAPI_ISteamNetworkingMessages_AcceptSessionWithUser"}, missing);
-        bind(dll, release, {"SteamAPI_SteamNetworkingMessage_t_Release"}, missing);
-        bind(dll, init_relay, {"SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess"}, missing);
+        bind(dll, send, {"SteamAPI_ISteamNetworking_SendP2PPacket"}, missing);
+        bind(dll, available, {"SteamAPI_ISteamNetworking_IsP2PPacketAvailable"}, missing);
+        bind(dll, read, {"SteamAPI_ISteamNetworking_ReadP2PPacket"}, missing);
+        bind(dll, accept, {"SteamAPI_ISteamNetworking_AcceptP2PSessionWithUser"}, missing);
         if (!missing.empty()) {
             reason = "steam_api64.dll is missing: " + missing;
             return false;
         }
-        if (user_acc() == nullptr || messages_acc() == nullptr) {
+        if (user_acc() == nullptr || net_acc() == nullptr) {
             tried = false; // Steam not initialised by the game yet; try again later
             reason = "Steam is not initialised yet";
             return false;
         }
-        if (auto* u = utils_acc()) init_relay(u);
         std::string optional;
         bind(dll, user_data_folder, {"SteamAPI_ISteamUser_GetUserDataFolder"}, optional);
         bind(dll, friend_state, {"SteamAPI_ISteamFriends_GetFriendPersonaState"}, optional);
         bind(dll, friend_relationship, {"SteamAPI_ISteamFriends_GetFriendRelationship"}, optional);
         bind(dll, invite_user, {"SteamAPI_ISteamFriends_InviteUserToGame"}, optional);
         bind(dll, overlay_invite, {"SteamAPI_ISteamFriends_ActivateGameOverlayInviteDialogConnectString"}, optional);
-        bind(dll, register_callback, {"SteamAPI_RegisterCallback"}, optional);
         bind(dll, apps_acc, {"SteamAPI_SteamApps_v008"}, optional);
         bind(dll, launch_cmdline, {"SteamAPI_ISteamApps_GetLaunchCommandLine"}, optional);
         ok = true;
-        register_callbacks();
         reason = "ok";
         return true;
     }
@@ -197,18 +162,11 @@ std::unordered_map<std::uint64_t, Friend> g_friends; // friends currently in Mon
 DWORD g_friends_at = 0;
 bool g_friends_valid = false;
 
-NetIdentity identity(std::uint64_t id) {
-    NetIdentity n{};
-    n.type = kIdentitySteamId;
-    n.size = sizeof(std::uint64_t);
-    n.steam_id64 = id;
-    return n;
-}
-
 bool is_individual(std::uint64_t id) { return (id >> 32) == 0x01100001u && (id & 0xFFFFFFFFu) != 0; }
 
-// ---- Trusted ids, Steam callbacks -----------------------------------------------------------------------------------
-// Callbacks run on the game's thread (inside SteamAPI_RunCallbacks); they only touch what g_cb_mutex guards.
+// ---- Trusted ids ----------------------------------------------------------------------------------------------------
+// No Steam callbacks (1.3.0): pending P2P session requests from friends / trusted ids are accepted by polling
+// (refresh_friends), and sending to someone accepts their session too.
 
 std::mutex g_cb_mutex;
 std::unordered_set<std::uint64_t> g_trusted;
@@ -217,12 +175,10 @@ struct Event {
     std::uint64_t from;
     std::string connect;
 };
-std::vector<Event> g_events;
-constexpr std::size_t kMaxEvents = 64;
+std::vector<Event> g_events; // stays empty: kept so events() keeps its shape for older Lua
+std::vector<std::string> g_loopback; // send_self -> poll
 
 constexpr int kRelationshipFriend = 3;
-constexpr int kCbJoinRequested = 337;   // GameRichPresenceJoinRequested_t { CSteamID; char connect[256]; }
-constexpr int kCbSessionRequest = 1251; // SteamNetworkingMessagesSessionRequest_t { SteamNetworkingIdentity; }
 
 bool is_trusted(std::uint64_t id) {
     std::lock_guard lock{g_cb_mutex};
@@ -233,54 +189,6 @@ bool is_friend(std::uint64_t id) {
     if (g_steam.friend_relationship == nullptr) return false;
     void* f = g_steam.friends_acc();
     return f != nullptr && g_steam.friend_relationship(f, id) == kRelationshipFriend;
-}
-
-void push_event(Event e) {
-    std::lock_guard lock{g_cb_mutex};
-    if (g_events.size() < kMaxEvents) g_events.push_back(std::move(e));
-}
-
-// Hand-built CCallbackBase: { vtable*, uint8 flags, int id }. The vtable has Run(void*), Run(void*, bool, uint64)
-// and GetCallbackSizeBytes(); MSVC may order the two Run overloads either way, so both slots point at the same
-// function, which only reads the first argument.
-struct CallbackObj {
-    void** vtable;
-    std::uint8_t flags;
-    std::int32_t id;
-};
-static_assert(offsetof(CallbackObj, flags) == 8 && offsetof(CallbackObj, id) == 12);
-
-void cb_run(CallbackObj* self, void* param, bool, std::uint64_t) {
-    if (self == nullptr || param == nullptr) return;
-    if (self->id == kCbJoinRequested) {
-        std::uint64_t from = 0;
-        std::memcpy(&from, param, sizeof(from));
-        const char* c = static_cast<const char*>(param) + 8;
-        push_event(Event{"join", from, std::string(c, strnlen(c, 256))});
-    } else if (self->id == kCbSessionRequest) {
-        NetIdentity who{};
-        std::memcpy(&who, param, sizeof(who));
-        if (who.type != kIdentitySteamId) return;
-        // Accept friends (any presence, invisible included) and trusted ids; strangers' requests time out.
-        if (is_trusted(who.steam_id64) || is_friend(who.steam_id64)) {
-            if (void* m = g_steam.messages_acc()) g_steam.accept(m, &who);
-            push_event(Event{"session", who.steam_id64, {}});
-        }
-    }
-}
-int cb_size(CallbackObj* self) { return self != nullptr && self->id == kCbJoinRequested ? 264 : 136; }
-
-void* g_cb_vtable[3] = {reinterpret_cast<void*>(&cb_run), reinterpret_cast<void*>(&cb_run), reinterpret_cast<void*>(&cb_size)};
-// Like CCallback::Register, the id is set by us before SteamAPI_RegisterCallback.
-CallbackObj g_cb_join{g_cb_vtable, 0, kCbJoinRequested};
-CallbackObj g_cb_session{g_cb_vtable, 0, kCbSessionRequest};
-bool g_callbacks = false;
-
-void register_callbacks() {
-    if (g_callbacks || g_steam.register_callback == nullptr) return;
-    g_callbacks = true;
-    g_steam.register_callback(&g_cb_join, kCbJoinRequested);
-    g_steam.register_callback(&g_cb_session, kCbSessionRequest);
 }
 
 // Who may talk to us: ourselves, trusted ids, Steam friends whatever their presence.
@@ -305,19 +213,15 @@ void refresh_friends() {
         if ((game_id & 0xFFFFFFu) != kAppId || ((game_id >> 24) & 0xFFu) != 0) continue;
         const char* name = g_steam.friend_name(f, id);
         g_friends[id] = Friend{name != nullptr ? name : ""};
-        // Accept message sessions from friends in the game only; anyone else's session requests time out.
-        const NetIdentity nid = identity(id);
-        g_steam.accept(g_steam.messages_acc(), &nid);
+        // Accept P2P session requests from friends in the game only; anyone else's requests time out.
+        g_steam.accept(g_steam.net_acc(), id);
     }
     std::vector<std::uint64_t> trusted;
     {
         std::lock_guard lock{g_cb_mutex};
         trusted.assign(g_trusted.begin(), g_trusted.end());
     }
-    for (const std::uint64_t id : trusted) {
-        const NetIdentity nid = identity(id);
-        g_steam.accept(g_steam.messages_acc(), &nid);
-    }
+    for (const std::uint64_t id : trusted) g_steam.accept(g_steam.net_acc(), id);
 }
 
 std::uint64_t to_id(lua_State* L, int idx) {
@@ -407,26 +311,25 @@ int l_send(lua_State* L) {
         refresh_friends();
         const std::uint64_t self = g_steam.get_steam_id(g_steam.user_acc());
         if (to != self && allowed(to, self)) {
-            const NetIdentity id = identity(to);
-            const int flags = (reliable ? kSendReliable : kSendUnreliable) | kSendAutoRestart;
-            sent = g_steam.send(g_steam.messages_acc(), &id, data, static_cast<std::uint32_t>(len), flags, kChannel) == kResultOk;
+            const int type = (reliable || len > kMaxUnreliable) ? kP2PReliable : kP2PUnreliable;
+            sent = g_steam.send(g_steam.net_acc(), to, data, static_cast<std::uint32_t>(len), type, kChannel);
         }
     }
     lua_pushboolean(L, sent);
     return 1;
 }
 
-// Loopback to our own Steam id; poll() returns it with from == self_id().
+// Loopback to ourselves inside the plugin; poll() returns it with from == self_id().
 int l_send_self(lua_State* L) {
     std::lock_guard lock{g_mutex};
     std::size_t len = 0;
     const char* data = lua_type(L, 1) == LUA_TSTRING ? lua_tolstring(L, 1, &len) : nullptr;
     bool sent = false;
     if (g_steam.ready() && data != nullptr && len > 0 && len <= kMaxBytes) {
-        const NetIdentity id = identity(g_steam.get_steam_id(g_steam.user_acc()));
-        g_steam.accept(g_steam.messages_acc(), &id);
-        sent = g_steam.send(g_steam.messages_acc(), &id, data, static_cast<std::uint32_t>(len),
-                            kSendReliable | kSendAutoRestart, kChannel) == kResultOk;
+        if (g_loopback.size() < static_cast<std::size_t>(kMaxPoll)) {
+            g_loopback.emplace_back(data, len);
+            sent = true;
+        }
     }
     lua_pushboolean(L, sent);
     return 1;
@@ -438,22 +341,32 @@ int l_poll(lua_State* L) {
     if (!g_steam.ready()) return 1;
     refresh_friends();
     const std::uint64_t self = g_steam.get_steam_id(g_steam.user_acc());
-    NetMessage* msgs[kMaxPoll]{};
-    const int n = g_steam.receive(g_steam.messages_acc(), kChannel, msgs, kMaxPoll);
     int out = 0;
-    for (int i = 0; i < n; ++i) {
-        NetMessage* m = msgs[i];
-        if (m == nullptr) continue;
-        const std::uint64_t from = m->peer.type == kIdentitySteamId ? m->peer.steam_id64 : 0;
-        if ((g_friends.count(from) != 0 || allowed(from, self)) && m->data != nullptr && m->size > 0 && static_cast<std::size_t>(m->size) <= kMaxBytes) {
+    for (const std::string& d : g_loopback) {
+        lua_newtable(L);
+        push_id(L, self);
+        lua_setfield(L, -2, "from");
+        lua_pushlstring(L, d.data(), d.size());
+        lua_setfield(L, -2, "data");
+        lua_rawseti(L, -2, ++out);
+    }
+    g_loopback.clear();
+    void* net = g_steam.net_acc();
+    std::vector<char> buf;
+    std::uint32_t size = 0;
+    for (int i = 0; net != nullptr && i < kMaxPoll && g_steam.available(net, &size, kChannel); ++i) {
+        buf.resize(std::max<std::size_t>(size, 1));
+        std::uint32_t got = 0;
+        std::uint64_t from = 0;
+        if (!g_steam.read(net, buf.data(), static_cast<std::uint32_t>(buf.size()), &got, &from, kChannel)) break;
+        if ((g_friends.count(from) != 0 || allowed(from, self)) && got > 0 && got <= kMaxBytes) {
             lua_newtable(L);
             push_id(L, from);
             lua_setfield(L, -2, "from");
-            lua_pushlstring(L, static_cast<const char*>(m->data), static_cast<std::size_t>(m->size));
+            lua_pushlstring(L, buf.data(), got);
             lua_setfield(L, -2, "data");
             lua_rawseti(L, -2, ++out);
         }
-        g_steam.release(m);
     }
     return 1;
 }
@@ -553,7 +466,7 @@ int l_launch_connect(lua_State* L) {
 
 int l_callbacks(lua_State* L) {
     std::lock_guard lock{g_mutex};
-    lua_pushboolean(L, g_steam.ready() && g_callbacks);
+    lua_pushboolean(L, false); // 1.3.0 registers no Steam callbacks
     return 1;
 }
 
@@ -830,7 +743,7 @@ void on_lua_state_created(lua_State* L) {
     lua_setfield(L, -2, "launch_connect");
     lua_pushcfunction(L, l_callbacks);
     lua_setfield(L, -2, "callbacks");
-    lua_pushstring(L, "1.2.1-dev");
+    lua_pushstring(L, "1.3.0");
     lua_setfield(L, -2, "version");
     lua_setglobal(L, "seamless_net");
 }

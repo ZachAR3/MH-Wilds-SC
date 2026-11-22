@@ -5,8 +5,11 @@ without re-inviting each other all the time. It's inspired by the Seamless Co-op
 Hunter World, but it's written from scratch for Wilds.
 
 > **This is an alpha, and right now most of it doesn't work.** 0.5.0 and 0.5.1 froze and crashed the game in real
-> co-op sessions. 0.5.2 is a safe build: only the co-op group and save backups are on, and everything else is
-> switched off while it gets rebuilt one feature at a time ([docs/REBUILD_PLAN.md](docs/REBUILD_PLAN.md)).
+> co-op sessions. 0.5.2 to 0.5.5 are cut-down builds: only the co-op group, save backups and (since 0.5.5) the
+> automatic Environment Link invite are on. Everything else is switched off while it gets rebuilt one feature at a
+> time ([docs/REBUILD_PLAN.md](docs/REBUILD_PLAN.md)).
+> 0.5.2 to 0.5.4 could still crash the game when someone joined your Link Party or environment; 0.5.5 fixes
+> that (8 scripted joins between two machines, no crash). Details in [docs/DETAILS.md](docs/DETAILS.md#crash-investigation-2026-11-22).
 
 ## ⚠️ Read this first
 
@@ -18,16 +21,20 @@ Hunter World, but it's written from scratch for Wilds.
 
 ## What it does
 
-What works now (0.5.2):
+What works now (0.5.5):
 
 - **Co-op group**: invite a Steam friend once from the mod's menu (they can be offline or invisible). After that you
-  stay grouped until someone leaves. The invite also sends a Steam chat invite.
+  stay grouped until someone leaves. The invite also sends a Steam chat invite (accept it while Wilds is closed:
+  Steam starts the game with the invite and the mod joins the group).
 - **Save backups** every time the game starts.
 - A log line before every call the mod makes into the game, so crashes can be traced.
+- **Auto Environment Link**: when a Link Party member who runs the mod is in a field with you, the mod sends the
+  game's own "invite my Link Party to my environment" for you; they accept it as usual. Passed 3 of 3 live joins.
+  There's also a panel button that sends the same invite by hand.
 
 Being rebuilt (experimental, off by default, can crash the game):
 
-- Auto Environment Link, and re-linking after hunts
+- Re-linking after hunts
 - Auto-joining group quests
 - Putting the group back in one Link Party after a disconnect
 - Fast travel together

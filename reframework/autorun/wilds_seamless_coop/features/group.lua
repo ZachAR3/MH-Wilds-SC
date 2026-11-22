@@ -207,6 +207,9 @@ local function scan_party()
                     save()
                 end
                 stranger_since[m.hunter_id] = nil
+            elseif not peer and group.member_by_hunter(m.hunter_id) then
+                -- a group member whose mod isn't reachable right now (P2P link down): still not a stranger
+                stranger_since[m.hunter_id] = nil
             else
                 stranger_since[m.hunter_id] = stranger_since[m.hunter_id] or now
                 if now - stranger_since[m.hunter_id] >= STRANGER_GRACE then stranger = m.name end

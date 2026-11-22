@@ -137,11 +137,13 @@ end
 
 local function on_play_start(args)
     watching = game.arg_int(args, 1)
+    util.debug("cutscene " .. tostring(watching) .. " started (" .. #partners() .. " linked partner(s) on this mission)")
     if active() then tell(watching, "play") end
 end
 
 local function on_play_end(args)
     local id = game.arg_int(args, 1)
+    util.debug("cutscene " .. tostring(id) .. " ended")
     if id == watching then watching = nil end
     votes[id] = nil
     if active() then tell(id, nil) end

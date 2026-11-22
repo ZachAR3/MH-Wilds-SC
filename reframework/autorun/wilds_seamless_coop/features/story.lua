@@ -39,7 +39,7 @@ local function note(line)
     if #story.log > 30 then table.remove(story.log) end
 end
 
-local function in_quest() return game.in_session(game.SESSION.QUEST()) end
+local function in_quest() return game.in_session(game.SESSION.QUEST(), true) end
 
 ------------------------------------------------------------------------------------------------------------------------
 -- Leader: report the game's own story steps

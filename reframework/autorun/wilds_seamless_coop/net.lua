@@ -17,7 +17,8 @@ local net = {
     contacts = {}, -- [steam id] = { id, hunter, hunter_name, card, stage, in_quest, link_n, open, seen, version }
 }
 
-local HELLO_EVERY, PEER_TIMEOUT, FRIENDS_EVERY = 3, 12, 10
+-- PEER_TIMEOUT must stay above QUIET_EVERY, or a contact only reached by the quiet HELLO keeps dropping.
+local HELLO_EVERY, PEER_TIMEOUT, FRIENDS_EVERY = 3, 20, 10
 local QUIET_EVERY = 15 -- HELLO to people who haven't answered yet (offline group members, pending invites)
 local next_quiet = 0
 local handlers, contact_handlers = {}, {}
@@ -109,7 +110,10 @@ end
 
 local my_card, card_at = nil, -100
 local function card()
-    if util.now() - card_at > 30 or not my_card then
+    if util.config.debug_no_net_reads then return nil end -- crash bisecting only (config.json)
+    -- The card never changes during a session: read it until we have it, then only every 5 minutes (each read makes
+    -- a game object).
+    if not my_card and util.now() - card_at > 30 or util.now() - card_at > 300 then
         card_at = util.now()
         local ok, c = pcall(game.self_card)
         if ok and c then my_card = c end
@@ -117,9 +121,22 @@ local function card()
     return my_card
 end
 
+-- Stage, story progress and next mission for the HELLO, read at the member-list pace (see game.member_ttl).
+local facts, facts_at = {}, -1000
+local function game_facts()
+    local now = util.now()
+    if now - facts_at >= game.member_ttl() or now < facts_at then
+        facts_at = now
+        if util.config.debug_no_net_reads then return facts end -- crash bisecting only (config.json)
+        facts = { stage = game.current_stage(), progress = game.story_progress(), next_mission = game.next_main_mission() }
+    end
+    return facts
+end
+
 local function hello()
     local me = game.self_member(game.SESSION.LINK())
     local c = card()
+    local f = game_facts()
     return {
         t = "hello",
         proto = net.PROTOCOL,
@@ -128,10 +145,10 @@ local function hello()
         in_link = me ~= nil,
         link_n = #game.members(game.SESSION.LINK()),
         card = c,
-        stage = game.current_stage(),
+        stage = f.stage,
         in_quest = game.in_session(game.SESSION.QUEST()),
-        progress = game.story_progress(),
-        next_mission = game.next_main_mission(),
+        progress = f.progress,
+        next_mission = f.next_mission,
         lead = util.config.lead_story == true,
         open = util.outsiders,
         enabled = util.config.enabled ~= false,
@@ -148,6 +165,9 @@ local function targets(p)
     if net.extra_targets then
         for id in pairs(net.extra_targets()) do out[id] = true end
     end
+    -- Mods that talk to us get answered, so both sides see each other even when only one side lists the other
+    -- (without this the contact dropped and came back every ~16 s).
+    for id in pairs(net.contacts) do out[id] = true end
     -- Link Party members not linked to a mod yet: Steam friends with the same Steam name (works when invisible).
     local unknown = {}
     for _, m in ipairs(game.members(game.SESSION.LINK())) do

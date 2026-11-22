@@ -20,12 +20,18 @@ recorder.WATCHED = {
     -- Link Party (whole party, not Environment Link): used to rebuild the party after a disconnect / late join
     { "app.NetworkRequestManager", "inviteLinkParty" },
     { "app.NetworkRequestManager", "acceptInviteLinkParty" },
-    { "app.NetworkRequestManager", "cancelInviteLinkParty" },
     { "app.NetworkRequestManager", "requestLinkRecruitJoin" },
     { "app.NetworkRequestManager", "requestLinkRecruitUpdate" },
     { "app.NetworkRequestManager", "joinSession" },
     { "app.NetworkRequestManager", "leaveSession" },
+    -- the game's menu-level requests (what its own menus call; the mod uses these now)
     { "app.cGUINetworkRequest", "reqLinqPartyJoinWindow" },
+    { "app.cGUINetworkRequest", "reqLinkPartySyncInvite" },
+    { "app.cGUINetworkRequest", "reqLinqPartySyncInviteWindow" },
+    { "app.cGUINetworkRequest", "reqLinqPartySyncJoinWindow" },
+    { "app.cGUINetworkRequest", "reqLinqPartyInvite" },
+    { "app.cGUINetworkRequest", "reqLinqPartyInviteWindow" },
+    { "app.cGUINetworkRequest", "reqLinqPartyQuestJoinWindow" },
 }
 
 -- Types whose method signatures go into the dump.
@@ -40,9 +46,13 @@ recorder.calls = {}   -- most recent first
 recorder.mine = false -- true while the mod itself is calling, so its own calls are not "learned"
 
 -- Plain Lua value of parameter i (decided by its declared type, never by guessing at the raw value).
-local function decode(args, i, td)
+-- Static methods have no `this`: their parameter i is args[1 + i], so the helpers get a shifted view.
+local function decode(raw, i, td, static)
+    local args = raw
+    if static then args = setmetatable({}, { __index = function(_, k) return raw[k - 1] end }) end
     local t = td:get_full_name()
     if t == "System.Guid" then return game.arg_guid(args, i) end
+    if t == "System.Nullable`1<System.Guid>" then return game.arg_nullable_guid(args[2 + i]) end
     if t == "System.Boolean" then return game.arg_bool(args, i) end
     if td:is_value_type() then return game.arg_int(args, i) end -- ints and enums
     local obj = game.arg_obj(args, i)
@@ -57,7 +67,7 @@ local function watch(type_name, name)
             local ptypes, values, learned = {}, {}, {}
             for i, td in ipairs(m:get_param_types() or {}) do
                 ptypes[i] = td:get_full_name()
-                values[i] = decode(args, i, td)
+                values[i] = decode(args, i, td, m:is_static())
                 -- Keys are strings so the sparse table survives the JSON round trip.
                 if ptypes[i] ~= "System.Guid" and type(values[i]) ~= "string" then learned[tostring(i)] = values[i] end
             end
@@ -108,7 +118,12 @@ end
 function recorder.init()
     -- Learning is only needed by the experimental features; with all of them off, the game isn't hooked at all.
     if not util.any_experimental_at_start() then return end
-    for _, w in ipairs(recorder.WATCHED) do watch(w[1], w[2]) end
+    -- One hook per method: skip what a feature already hooks (features init first).
+    local taken = {}
+    for _, h in ipairs(game.hook_requests) do taken[h[1] .. "." .. h[2]] = true end
+    for _, w in ipairs(recorder.WATCHED) do
+        if not taken[w[1] .. "." .. w[2]] then watch(w[1], w[2]) end
+    end
 end
 
 return recorder

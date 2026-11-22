@@ -6,19 +6,19 @@ local CONFIG_FILE = "wilds_seamless_coop/config.json" -- relative to reframework
 local LOG_SLOTS = 5                                   -- logs/session-1.log .. session-5.log, oldest overwritten
 
 -- Bumped when a release has to reset saved settings (see load_config).
-local CONFIG_VERSION = 2
+local CONFIG_VERSION = 3
 
 util.defaults = {
     enabled = true,           -- master switch: off = the game plays exactly as without the mod (save backups still run)
     steam_chat_invite = true, -- group invites also send a Steam chat invite (reaches offline/invisible friends)
+    auto_link = true,         -- send Environment Link invites to modded Link Party members in the same field
+                              -- (experimental until 0.5.5; passed 3 of 3 live joins between two machines)
     -- Experimental (util.EXPERIMENTAL): not working in the real game yet. Off unless switched on, and their hooks are
     -- only installed when they are on at game start.
     follow_travel = false,     -- fast travel takes your group with you
     travel_mode = "area",      -- "warp" (same spot, falls back to "area") | "area" (join the mover's Environment Link)
     auto_follow = false,       -- accept Link Party quest invites automatically
     stay_linked = false,       -- don't drop Environment Link when a story event starts
-    auto_link = false,         -- send Environment Link invites to modded Link Party members in the same field
-    auto_accept_link = false,  -- accept Environment Link invites from Link Party members automatically
     auto_party = false,        -- rebuild the Link Party with your group after a disconnect or a late join
     relink_after_hunt = false, -- re-invite the hunters you were linked with when a hunt ends
     lead_story = false,        -- this player leads the story (exactly one player in the party ticks it)
@@ -32,8 +32,6 @@ util.defaults = {
 
 -- { key, panel label } of the features that are not working in the real game yet.
 util.EXPERIMENTAL = {
-    { "auto_link", "Auto-invite to Environment Link" },
-    { "auto_accept_link", "Auto-accept Environment Link invites" },
     { "relink_after_hunt", "Re-link after hunts" },
     { "auto_follow", "Auto-follow group quests" },
     { "auto_party", "Rebuild the Link Party with your group automatically" },
@@ -168,23 +166,33 @@ function util.load_config()
     util.config.group = type(saved.group) == "table" and saved.group or {}
     util.config.group.members = type(util.config.group.members) == "table" and util.config.group.members or {}
     util.config.log_slot = saved.log_slot
+    util.config.debug_no_reads = saved.debug_no_reads == true
+    util.config.debug_no_net_reads = saved.debug_no_net_reads == true -- hidden: crash bisecting only, no panel switch
     -- 0.4.x learned a developer-only stage getter on some PCs; the field manager's own getter is the right one.
     if type(util.config.learned.stage_getter) == "table" and util.config.learned.stage_getter.method == "getDevCurrentStage" then
         util.config.learned.stage_getter = nil
     end
     -- 0.5.1 and older had every feature on, and some of them crashed the game: start from the safe defaults once.
-    if next(saved) ~= nil and (tonumber(saved.config_version) or 1) < CONFIG_VERSION then
+    if next(saved) ~= nil and (tonumber(saved.config_version) or 1) < 2 then
         for _, t in ipairs(util.EXPERIMENTAL) do util.config[t[1]] = false end
         util.config.story_sync = "off"
         util.config.travel_mode = "area"
         util.migrated = true
     end
+    -- 0.5.5: auto_link left the experimental list and is on by default; switch it on once for older settings.
+    util.auto_link_enabled = next(saved) ~= nil and (tonumber(saved.config_version) or 1) < 3
+    if util.auto_link_enabled then util.config.auto_link = true end
     util.config.config_version = CONFIG_VERSION
     for k, v in pairs(util.config) do at_start[k] = v end
 end
 
 function util.save_config()
-    json.dump_file(CONFIG_FILE, util.config)
+    -- The hidden bisect switches are only written while on, so they don't show up in everyone's config.json.
+    local out = {}
+    for k, v in pairs(util.config) do out[k] = v end
+    if not out.debug_no_reads then out.debug_no_reads = nil end
+    if not out.debug_no_net_reads then out.debug_no_net_reads = nil end
+    json.dump_file(CONFIG_FILE, out)
 end
 
 -- Wall-clock seconds since the game started (MSVC's clock() is wall time on Windows).
@@ -195,6 +203,16 @@ function util.try(label, fn, ...)
     local ok, res = pcall(fn, ...)
     if not ok then util.warn(label .. " failed: " .. tostring(res)) end
     return ok, res
+end
+
+-- Work for the game's main thread (panel buttons run on the render thread, where touching the game can crash it).
+util.story_progress = nil -- refreshed on the main thread, shown in the panel
+local main_queue = {}
+function util.main(fn) main_queue[#main_queue + 1] = fn end
+function util.take_main_queue()
+    local q = main_queue
+    main_queue = {}
+    return q
 end
 
 return util
